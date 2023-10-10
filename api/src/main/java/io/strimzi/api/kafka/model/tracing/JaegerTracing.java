@@ -29,6 +29,9 @@ public class JaegerTracing extends Tracing {
 
     public static final String TYPE_JAEGER = "jaeger";
 
+    public static final String CONSUMER_INTERCEPTOR_CLASS_NAME = "io.opentracing.contrib.kafka.TracingConsumerInterceptor";
+    public static final String PRODUCER_INTERCEPTOR_CLASS_NAME = "io.opentracing.contrib.kafka.TracingProducerInterceptor";
+
     @Description("Must be `" + TYPE_JAEGER + "`")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @Override

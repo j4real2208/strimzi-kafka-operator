@@ -8,8 +8,8 @@ import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.strimzi.certs.CertAndKey;
 import io.strimzi.certs.CertManager;
-import io.strimzi.operator.cluster.model.Ca;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.MockCertManager;
@@ -180,7 +180,7 @@ public class KafkaUserModelCertificateHandlingTest {
         assertThat(model.reuseCertificateCalled, is(1));
     }
 
-    class MockKafkaUserModel extends KafkaUserModel {
+    static class MockKafkaUserModel extends KafkaUserModel {
         public int reuseCertificateCalled = 0;
         public int generateNewCertificateCalled = 0;
 

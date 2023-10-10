@@ -10,6 +10,9 @@ import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.openshift.api.model.Build;
 import io.strimzi.api.kafka.model.KafkaConnectResources;
 
+/**
+ * Utility methods for Kafka Connect Build
+ */
 public class KafkaConnectBuildUtils {
     /**
      * Checks if Pod already completed
@@ -65,7 +68,8 @@ public class KafkaConnectBuildUtils {
      * @return      True if the Build is complete with error, false otherwise
      */
     public static boolean buildFailed(Build build)   {
-        return build.getStatus() != null
+        return build != null
+                && build.getStatus() != null
                 && ("Failed".equals(build.getStatus().getPhase()) || "Error".equals(build.getStatus().getPhase()) || "Cancelled".equals(build.getStatus().getPhase()));
     }
 
@@ -77,7 +81,9 @@ public class KafkaConnectBuildUtils {
      * @return      True if the Build is complete with success, false otherwise
      */
     public static boolean buildSucceeded(Build build)   {
-        return build.getStatus() != null && "Complete".equals(build.getStatus().getPhase());
+        return build != null
+                && build.getStatus() != null
+                && "Complete".equals(build.getStatus().getPhase());
     }
 
     /**

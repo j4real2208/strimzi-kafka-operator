@@ -4,52 +4,47 @@
  */
 package io.strimzi.operator.cluster.model;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
 import io.fabric8.kubernetes.api.model.ContainerPort;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import io.fabric8.kubernetes.api.model.Secret;
-import io.fabric8.kubernetes.api.model.SecurityContext;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
-import io.fabric8.kubernetes.api.model.apps.DeploymentStrategy;
-import io.fabric8.kubernetes.api.model.apps.DeploymentStrategyBuilder;
-import io.fabric8.kubernetes.api.model.apps.RollingUpdateDeploymentBuilder;
 import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicy;
-import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyBuilder;
 import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyIngressRule;
-import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyIngressRuleBuilder;
 import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyPeer;
-import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyPeerBuilder;
-import io.fabric8.kubernetes.api.model.policy.v1.PodDisruptionBudget;
-import io.strimzi.api.kafka.model.ContainerEnvVar;
 import io.strimzi.api.kafka.model.CruiseControlResources;
 import io.strimzi.api.kafka.model.CruiseControlSpec;
-import io.strimzi.api.kafka.model.InlineLogging;
+import io.strimzi.api.kafka.model.JvmOptions;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaClusterSpec;
 import io.strimzi.api.kafka.model.KafkaResources;
-import io.strimzi.api.kafka.model.Logging;
-import io.strimzi.api.kafka.model.Probe;
-import io.strimzi.api.kafka.model.ProbeBuilder;
 import io.strimzi.api.kafka.model.storage.Storage;
 import io.strimzi.api.kafka.model.template.CruiseControlTemplate;
+import io.strimzi.api.kafka.model.template.DeploymentTemplate;
+import io.strimzi.api.kafka.model.template.InternalServiceTemplate;
+import io.strimzi.api.kafka.model.template.PodTemplate;
 import io.strimzi.certs.CertAndKey;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.model.cruisecontrol.Capacity;
+import io.strimzi.operator.cluster.model.logging.LoggingModel;
+import io.strimzi.operator.cluster.model.logging.SupportsLogging;
+import io.strimzi.operator.cluster.model.metrics.MetricsModel;
+import io.strimzi.operator.cluster.model.metrics.SupportsMetrics;
 import io.strimzi.operator.cluster.model.securityprofiles.ContainerSecurityProviderContextImpl;
 import io.strimzi.operator.cluster.model.securityprofiles.PodSecurityProviderContextImpl;
-import io.strimzi.operator.cluster.operator.resource.cruisecontrol.CruiseControlConfigurationParameters;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlConfigurationParameters;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.Labels;
-import io.strimzi.operator.common.model.OrderedProperties;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -61,27 +56,35 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static io.strimzi.api.kafka.model.template.DeploymentStrategy.ROLLING_UPDATE;
 import static io.strimzi.operator.cluster.model.CruiseControlConfiguration.CRUISE_CONTROL_DEFAULT_ANOMALY_DETECTION_GOALS;
 import static io.strimzi.operator.cluster.model.CruiseControlConfiguration.CRUISE_CONTROL_GOALS;
 import static io.strimzi.operator.cluster.model.VolumeUtils.createConfigMapVolume;
 import static io.strimzi.operator.cluster.model.VolumeUtils.createSecretVolume;
 import static io.strimzi.operator.cluster.model.VolumeUtils.createVolumeMount;
 
-public class CruiseControl extends AbstractModel {
-    protected static final String APPLICATION_NAME = "cruise-control";
-
-    public static final String CRUISE_CONTROL_METRIC_REPORTER = "com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter";
-
+/**
+ * Cruise Control model
+ */
+public class CruiseControl extends AbstractModel implements SupportsMetrics, SupportsLogging {
+    protected static final String COMPONENT_TYPE = "cruise-control";
     protected static final String CRUISE_CONTROL_CONTAINER_NAME = "cruise-control";
 
     // Fields used for Cruise Control API authentication
+    /**
+     * Name of the admin user
+     */
     public static final String API_ADMIN_NAME = "admin";
     private static final String API_ADMIN_ROLE = "ADMIN";
     protected static final String API_USER_NAME = "user";
     private static final String API_USER_ROLE = "USER";
-    public static final String API_ADMIN_PASSWORD_KEY = APPLICATION_NAME + ".apiAdminPassword";
-    private static final String API_USER_PASSWORD_KEY = APPLICATION_NAME + ".apiUserPassword";
-    private static final String API_AUTH_FILE_KEY = APPLICATION_NAME + ".apiAuthFile";
+
+    /**
+     * Key for the admin user password
+     */
+    public static final String API_ADMIN_PASSWORD_KEY = COMPONENT_TYPE + ".apiAdminPassword";
+    private static final String API_USER_PASSWORD_KEY = COMPONENT_TYPE + ".apiUserPassword";
+    private static final String API_AUTH_FILE_KEY = COMPONENT_TYPE + ".apiAuthFile";
     protected static final String API_HEALTHCHECK_PATH = "/kafkacruisecontrol/state";
 
     protected static final String TLS_CC_CERTS_VOLUME_NAME = "cc-certs";
@@ -95,29 +98,33 @@ public class CruiseControl extends AbstractModel {
 
     protected static final String API_AUTH_CREDENTIALS_FILE = API_AUTH_CONFIG_VOLUME_MOUNT + API_AUTH_FILE_KEY;
 
-    public static final String ENV_VAR_CRUISE_CONTROL_METRICS_ENABLED = "CRUISE_CONTROL_METRICS_ENABLED";
+    protected static final String ENV_VAR_CRUISE_CONTROL_METRICS_ENABLED = "CRUISE_CONTROL_METRICS_ENABLED";
 
     // Configuration defaults
-    protected static final int DEFAULT_REPLICAS = 1;
-    public static final boolean DEFAULT_CRUISE_CONTROL_METRICS_ENABLED = false;
+    protected static final boolean DEFAULT_CRUISE_CONTROL_METRICS_ENABLED = false;
 
-    // Default probe settings (liveness and readiness) for health checks
-    protected static final int DEFAULT_HEALTHCHECK_DELAY = 15;
-    protected static final int DEFAULT_HEALTHCHECK_TIMEOUT = 5;
-
-    public static final Probe DEFAULT_HEALTHCHECK_OPTIONS = new ProbeBuilder()
-            .withInitialDelaySeconds(DEFAULT_HEALTHCHECK_DELAY)
-            .withTimeoutSeconds(DEFAULT_HEALTHCHECK_TIMEOUT)
-            .build();
 
     private String minInsyncReplicas = "1";
     private boolean sslEnabled;
     private boolean authEnabled;
-    public Capacity capacity;
+    @SuppressFBWarnings({"UWF_FIELD_NOT_INITIALIZED_IN_CONSTRUCTOR"}) // This field is initialized in the fromCrd method
+    protected Capacity capacity;
+    @SuppressFBWarnings({"UWF_FIELD_NOT_INITIALIZED_IN_CONSTRUCTOR"}) // This field is initialized in the fromCrd method
+    private MetricsModel metrics;
+    private LoggingModel logging;
+    /* test */ CruiseControlConfiguration configuration;
 
-    public static final String REST_API_PORT_NAME = "rest-api";
+    /**
+     * Port of the Cruise Control REST API
+     */
     public static final int REST_API_PORT = 9090;
-    public static final String MIN_INSYNC_REPLICAS = "min.insync.replicas";
+    /* test */ static final String REST_API_PORT_NAME = "rest-api";
+
+    /* test */ static final String MIN_INSYNC_REPLICAS = "min.insync.replicas";
+
+    /* test */ Capacity getCapacity() {
+        return capacity;
+    }
 
     // Cruise Control configuration keys (EnvVariables)
     protected static final String ENV_VAR_CRUISE_CONTROL_CONFIGURATION = "CRUISE_CONTROL_CONFIGURATION";
@@ -135,8 +142,9 @@ public class CruiseControl extends AbstractModel {
     protected static final String CO_ENV_VAR_CUSTOM_CRUISE_CONTROL_POD_LABELS = "STRIMZI_CUSTOM_CRUISE_CONTROL_LABELS";
 
     // Templates
-    protected List<ContainerEnvVar> templateCruiseControlContainerEnvVars;
-    protected SecurityContext templateCruiseControlContainerSecurityContext;
+    private DeploymentTemplate templateDeployment;
+    private PodTemplate templatePod;
+    private InternalServiceTemplate templateService;
 
     private static final Map<String, String> DEFAULT_POD_LABELS = new HashMap<>();
     static {
@@ -151,119 +159,86 @@ public class CruiseControl extends AbstractModel {
      *
      * @param reconciliation The reconciliation
      * @param resource  Kubernetes resource with metadata containing the namespace and cluster name
+     * @param sharedEnvironmentProvider Shared environment provider
      */
-    protected CruiseControl(Reconciliation reconciliation, HasMetadata resource) {
-        super(reconciliation, resource, APPLICATION_NAME);
-        this.name = CruiseControlResources.deploymentName(cluster);
-        this.serviceName = CruiseControlResources.serviceName(cluster);
-        this.ancillaryConfigMapName = CruiseControlResources.logAndMetricsConfigMapName(cluster);
-        this.replicas = DEFAULT_REPLICAS;
-        this.livenessProbeOptions = DEFAULT_HEALTHCHECK_OPTIONS;
-        this.readinessProbeOptions = DEFAULT_HEALTHCHECK_OPTIONS;
-        this.mountPath = "/var/lib/kafka";
-        this.logAndMetricsConfigVolumeName = LOG_AND_METRICS_CONFIG_VOLUME_NAME;
-        this.logAndMetricsConfigMountPath = LOG_AND_METRICS_CONFIG_VOLUME_MOUNT;
-        this.isMetricsEnabled = DEFAULT_CRUISE_CONTROL_METRICS_ENABLED;
+    private CruiseControl(Reconciliation reconciliation, HasMetadata resource, SharedEnvironmentProvider sharedEnvironmentProvider) {
+        super(reconciliation, resource, CruiseControlResources.deploymentName(resource.getMetadata().getName()), COMPONENT_TYPE, sharedEnvironmentProvider);
     }
 
     /**
      * Creates an instance of the Cruise Control model from the custom resource. When Cruise Control is not enabled,
      * this will return null.
      *
-     * @param reconciliation    Reconciliation marker used for logging
-     * @param kafkaCr           The Kafka custom resource
-     * @param versions          Supported Kafka versions
-     * @param storage           The actual storage configuration used by the cluster. This might differ from the storage
-     *                          configuration configured by the user in the Kafka CR due to unallowed changes.
+     * @param reconciliation                Reconciliation marker used for logging
+     * @param kafkaCr                       The Kafka custom resource
+     * @param versions                      Supported Kafka versions
+     * @param kafkaBrokerNodes              List of the broker nodes which are part of the Kafka cluster
+     * @param kafkaStorage                  A map with storage configuration used by the Kafka cluster and its node pools
+     * @param kafkaBrokerResources          A map with resource configuration used by the Kafka cluster and its broker pools
+     * @param sharedEnvironmentProvider     Shared environment provider
      *
-     * @return                  Instance of the Cruise Control model
+     * @return  Instance of the Cruise Control model
      */
     @SuppressWarnings({"checkstyle:NPathComplexity", "checkstyle:CyclomaticComplexity"})
-    public static CruiseControl fromCrd(Reconciliation reconciliation, Kafka kafkaCr, KafkaVersion.Lookup versions, Storage storage) {
+    public static CruiseControl fromCrd(
+            Reconciliation reconciliation,
+            Kafka kafkaCr,
+            KafkaVersion.Lookup versions,
+            Set<NodeRef> kafkaBrokerNodes,
+            Map<String, Storage> kafkaStorage,
+            Map<String, ResourceRequirements> kafkaBrokerResources,
+            SharedEnvironmentProvider sharedEnvironmentProvider
+    ) {
         CruiseControlSpec ccSpec = kafkaCr.getSpec().getCruiseControl();
         KafkaClusterSpec kafkaClusterSpec = kafkaCr.getSpec().getKafka();
 
         if (ccSpec != null) {
-            CruiseControl cruiseControl = new CruiseControl(reconciliation, kafkaCr);
-
-            cruiseControl.setReplicas(DEFAULT_REPLICAS);
+            CruiseControl result = new CruiseControl(reconciliation, kafkaCr, sharedEnvironmentProvider);
 
             String image = ccSpec.getImage();
             if (image == null) {
                 image = System.getenv().getOrDefault(ClusterOperatorConfig.STRIMZI_DEFAULT_CRUISE_CONTROL_IMAGE, versions.kafkaImage(kafkaClusterSpec.getImage(), versions.defaultVersion().version()));
             }
-            cruiseControl.setImage(image);
+            result.image = image;
 
-            cruiseControl.updateConfiguration(ccSpec);
-            CruiseControlConfiguration ccConfiguration = (CruiseControlConfiguration) cruiseControl.getConfiguration();
-            cruiseControl.sslEnabled = ccConfiguration.isApiSslEnabled();
-            cruiseControl.authEnabled = ccConfiguration.isApiAuthEnabled();
+            result.updateConfiguration(ccSpec);
+            CruiseControlConfiguration ccConfiguration = result.configuration;
+            result.sslEnabled = ccConfiguration.isApiSslEnabled();
+            result.authEnabled = ccConfiguration.isApiAuthEnabled();
 
             KafkaConfiguration configuration = new KafkaConfiguration(reconciliation, kafkaClusterSpec.getConfig().entrySet());
             if (configuration.getConfigOption(MIN_INSYNC_REPLICAS) != null) {
-                cruiseControl.minInsyncReplicas = configuration.getConfigOption(MIN_INSYNC_REPLICAS);
+                result.minInsyncReplicas = configuration.getConfigOption(MIN_INSYNC_REPLICAS);
             }
 
             // To avoid illegal storage configurations provided by the user,
             // we rely on the storage configuration provided by the KafkaAssemblyOperator
-            cruiseControl.capacity = new Capacity(reconciliation, kafkaCr.getSpec(), storage);
-
-            // Parse different types of metrics configurations
-            ModelUtils.parseMetrics(cruiseControl, ccSpec);
-
-            if (ccSpec.getReadinessProbe() != null) {
-                cruiseControl.setReadinessProbe(ccSpec.getReadinessProbe());
-            }
-
-            if (ccSpec.getLivenessProbe() != null) {
-                cruiseControl.setLivenessProbe(ccSpec.getLivenessProbe());
-            }
-
-            Logging logging = ccSpec.getLogging();
-            cruiseControl.setLogging(logging == null ? new InlineLogging() : logging);
-
-            cruiseControl.setGcLoggingEnabled(ccSpec.getJvmOptions() == null ? DEFAULT_JVM_GC_LOGGING_ENABLED : ccSpec.getJvmOptions().isGcLoggingEnabled());
-            cruiseControl.setJvmOptions(ccSpec.getJvmOptions());
-
-            cruiseControl.setResources(ccSpec.getResources());
-            cruiseControl.setOwnerReference(kafkaCr);
+            result.capacity = new Capacity(reconciliation, kafkaCr.getSpec(), kafkaBrokerNodes, kafkaStorage, kafkaBrokerResources);
+            result.readinessProbeOptions = ProbeUtils.extractReadinessProbeOptionsOrDefault(ccSpec, ProbeUtils.DEFAULT_HEALTHCHECK_OPTIONS);
+            result.livenessProbeOptions = ProbeUtils.extractLivenessProbeOptionsOrDefault(ccSpec, ProbeUtils.DEFAULT_HEALTHCHECK_OPTIONS);
+            result.gcLoggingEnabled = ccSpec.getJvmOptions() == null ? JvmOptions.DEFAULT_GC_LOGGING_ENABLED : ccSpec.getJvmOptions().isGcLoggingEnabled();
+            result.jvmOptions = ccSpec.getJvmOptions();
+            result.metrics = new MetricsModel(ccSpec);
+            result.logging = new LoggingModel(ccSpec, result.getClass().getSimpleName(), true, false);
+            result.resources = ccSpec.getResources();
 
             if (ccSpec.getTemplate() != null) {
                 CruiseControlTemplate template = ccSpec.getTemplate();
 
-                ModelUtils.parsePodTemplate(cruiseControl, template.getPod());
-                ModelUtils.parseInternalServiceTemplate(cruiseControl, template.getApiService());
-
-                if (template.getDeployment() != null && template.getDeployment().getMetadata() != null) {
-                    cruiseControl.templateDeploymentLabels = template.getDeployment().getMetadata().getLabels();
-                    cruiseControl.templateDeploymentAnnotations = template.getDeployment().getMetadata().getAnnotations();
-                }
-
-                if (template.getCruiseControlContainer() != null && template.getCruiseControlContainer().getEnv() != null) {
-                    cruiseControl.templateCruiseControlContainerEnvVars = template.getCruiseControlContainer().getEnv();
-                }
-
-                if (template.getCruiseControlContainer() != null && template.getCruiseControlContainer().getSecurityContext() != null) {
-                    cruiseControl.templateCruiseControlContainerSecurityContext = template.getCruiseControlContainer().getSecurityContext();
-                }
-
-                if (template.getServiceAccount() != null && template.getServiceAccount().getMetadata() != null) {
-                    cruiseControl.templateServiceAccountLabels = template.getServiceAccount().getMetadata().getLabels();
-                    cruiseControl.templateServiceAccountAnnotations = template.getServiceAccount().getMetadata().getAnnotations();
-                }
-
-                ModelUtils.parsePodDisruptionBudgetTemplate(cruiseControl, template.getPodDisruptionBudget());
+                result.templateDeployment = template.getDeployment();
+                result.templatePod = template.getPod();
+                result.templateService = template.getApiService();
+                result.templateServiceAccount = template.getServiceAccount();
+                result.templateContainer = template.getCruiseControlContainer();
             }
 
-            cruiseControl.templatePodLabels = Util.mergeLabelsOrAnnotations(cruiseControl.templatePodLabels, DEFAULT_POD_LABELS);
-
-            return cruiseControl;
+            return result;
         } else {
             return null;
         }
     }
 
-    public void updateConfiguration(CruiseControlSpec spec) {
+    private void updateConfiguration(CruiseControlSpec spec) {
         CruiseControlConfiguration userConfiguration = new CruiseControlConfiguration(reconciliation, spec.getConfig().entrySet());
         for (Map.Entry<String, String> defaultEntry : CruiseControlConfiguration.getCruiseControlDefaultPropertiesMap().entrySet()) {
             if (userConfiguration.getConfigOption(defaultEntry.getKey()) == null) {
@@ -272,7 +247,7 @@ public class CruiseControl extends AbstractModel {
         }
         // Ensure that the configured anomaly.detection.goals are a sub-set of the default goals
         checkGoals(userConfiguration);
-        this.setConfiguration(userConfiguration);
+        this.configuration = userConfiguration;
     }
 
     /**
@@ -313,145 +288,129 @@ public class CruiseControl extends AbstractModel {
         }
     }
 
+    /**
+     * @return  Generates a Kubernetes Service for Cruise Control
+     */
     public Service generateService() {
-        return createService("ClusterIP", List.of(createServicePort(REST_API_PORT_NAME, REST_API_PORT, REST_API_PORT, "TCP")), templateServiceAnnotations);
+        return ServiceUtils.createClusterIpService(
+                CruiseControlResources.serviceName(cluster),
+                namespace,
+                labels,
+                ownerReference,
+                templateService,
+                List.of(ServiceUtils.createServicePort(REST_API_PORT_NAME, REST_API_PORT, REST_API_PORT, "TCP"))
+        );
     }
 
     protected List<ContainerPort> getContainerPortList() {
         List<ContainerPort> portList = new ArrayList<>(1);
 
-        portList.add(createContainerPort(REST_API_PORT_NAME, REST_API_PORT, "TCP"));
+        portList.add(ContainerUtils.createContainerPort(REST_API_PORT_NAME, REST_API_PORT));
 
-        if (isMetricsEnabled) {
-            portList.add(createContainerPort(METRICS_PORT_NAME, METRICS_PORT, "TCP"));
+        if (metrics.isEnabled()) {
+            portList.add(ContainerUtils.createContainerPort(MetricsModel.METRICS_PORT_NAME, MetricsModel.METRICS_PORT));
         }
 
         return portList;
     }
 
     protected List<Volume> getVolumes(boolean isOpenShift) {
-        return List.of(createTempDirVolume(),
+        return List.of(VolumeUtils.createTempDirVolume(templatePod),
                 createSecretVolume(TLS_CC_CERTS_VOLUME_NAME, CruiseControlResources.secretName(cluster), isOpenShift),
                 createSecretVolume(TLS_CA_CERTS_VOLUME_NAME, AbstractModel.clusterCaCertSecretName(cluster), isOpenShift),
                 createSecretVolume(API_AUTH_CONFIG_VOLUME_NAME, CruiseControlResources.apiSecretName(cluster), isOpenShift),
-                createConfigMapVolume(logAndMetricsConfigVolumeName, ancillaryConfigMapName));
+                createConfigMapVolume(LOG_AND_METRICS_CONFIG_VOLUME_NAME, CruiseControlResources.logAndMetricsConfigMapName(cluster)));
     }
 
     protected List<VolumeMount> getVolumeMounts() {
-        return List.of(createTempDirVolumeMount(),
+        return List.of(VolumeUtils.createTempDirVolumeMount(),
                 createVolumeMount(CruiseControl.TLS_CC_CERTS_VOLUME_NAME, CruiseControl.TLS_CC_CERTS_VOLUME_MOUNT),
                 createVolumeMount(CruiseControl.TLS_CA_CERTS_VOLUME_NAME, CruiseControl.TLS_CA_CERTS_VOLUME_MOUNT),
                 createVolumeMount(CruiseControl.API_AUTH_CONFIG_VOLUME_NAME, CruiseControl.API_AUTH_CONFIG_VOLUME_MOUNT),
-                createVolumeMount(logAndMetricsConfigVolumeName, logAndMetricsConfigMountPath));
+                createVolumeMount(LOG_AND_METRICS_CONFIG_VOLUME_NAME, LOG_AND_METRICS_CONFIG_VOLUME_MOUNT));
     }
 
+    /**
+     * Generates Kubernetes Deployment for Cruise Control
+     *
+     * @param isOpenShift       Flag indicating if we are on OpenShift or not
+     * @param imagePullPolicy   Image pull policy
+     * @param imagePullSecrets  Image pull secrets
+     *
+     * @return  Cruise Control Kubernetes Deployment
+     */
     public Deployment generateDeployment(boolean isOpenShift, ImagePullPolicy imagePullPolicy, List<LocalObjectReference> imagePullSecrets) {
-        DeploymentStrategy updateStrategy = new DeploymentStrategyBuilder()
-                .withType("RollingUpdate")
-                .withRollingUpdate(new RollingUpdateDeploymentBuilder()
-                        .withMaxSurge(new IntOrString(1))
-                        .withMaxUnavailable(new IntOrString(0))
-                        .build())
-                .build();
-
-        return createDeployment(
-                updateStrategy,
-                Collections.emptyMap(),
-                Collections.emptyMap(),
-                getMergedAffinity(),
-                getInitContainers(imagePullPolicy),
-                getContainers(imagePullPolicy),
-                getVolumes(isOpenShift),
-                imagePullSecrets,
-                securityProvider.cruiseControlPodSecurityContext(new PodSecurityProviderContextImpl(templateSecurityContext)));
+        return WorkloadUtils.createDeployment(
+                componentName,
+                namespace,
+                labels,
+                ownerReference,
+                templateDeployment,
+                1,
+                null,
+                WorkloadUtils.deploymentStrategy(TemplateUtils.deploymentStrategy(templateDeployment, ROLLING_UPDATE)),
+                WorkloadUtils.createPodTemplateSpec(
+                        componentName,
+                        labels,
+                        templatePod,
+                        DEFAULT_POD_LABELS,
+                        Map.of(),
+                        templatePod != null ? templatePod.getAffinity() : null,
+                        null,
+                        List.of(createContainer(imagePullPolicy)),
+                        getVolumes(isOpenShift),
+                        imagePullSecrets,
+                        securityProvider.cruiseControlPodSecurityContext(new PodSecurityProviderContextImpl(templatePod))
+                )
+        );
     }
 
-    @Override
-    protected List<Container> getContainers(ImagePullPolicy imagePullPolicy) {
-        Container container = new ContainerBuilder()
-                .withName(CRUISE_CONTROL_CONTAINER_NAME)
-                .withImage(getImage())
-                .withCommand("/opt/cruise-control/cruise_control_run.sh")
-                .withEnv(getEnvVars())
-                .withPorts(getContainerPortList())
-                .withLivenessProbe(ProbeGenerator.defaultBuilder(livenessProbeOptions)
-                        .withNewExec()
-                            .withCommand("/opt/cruise-control/cruise_control_healthcheck.sh")
-                        .endExec()
-                        .build())
-                .withReadinessProbe(ProbeGenerator.defaultBuilder(readinessProbeOptions)
-                        .withNewExec()
-                            .withCommand("/opt/cruise-control/cruise_control_healthcheck.sh")
-                        .endExec()
-                        .build())
-                .withResources(getResources())
-                .withVolumeMounts(getVolumeMounts())
-                .withImagePullPolicy(determineImagePullPolicy(imagePullPolicy, getImage()))
-                .withSecurityContext(securityProvider.cruiseControlContainerSecurityContext(new ContainerSecurityProviderContextImpl(templateCruiseControlContainerSecurityContext)))
-                .build();
-
-        return Collections.singletonList(container);
+    /* test */ Container createContainer(ImagePullPolicy imagePullPolicy) {
+        return ContainerUtils.createContainer(
+                CRUISE_CONTROL_CONTAINER_NAME,
+                image,
+                List.of("/opt/cruise-control/cruise_control_run.sh"),
+                securityProvider.cruiseControlContainerSecurityContext(new ContainerSecurityProviderContextImpl(templateContainer)),
+                resources,
+                getEnvVars(),
+                getContainerPortList(),
+                getVolumeMounts(),
+                ProbeUtils.defaultBuilder(livenessProbeOptions).withNewExec().withCommand("/opt/cruise-control/cruise_control_healthcheck.sh").endExec().build(),
+                ProbeUtils.defaultBuilder(readinessProbeOptions).withNewExec().withCommand("/opt/cruise-control/cruise_control_healthcheck.sh").endExec().build(),
+                imagePullPolicy
+        );
     }
 
-    @Override
     protected List<EnvVar> getEnvVars() {
         List<EnvVar> varList = new ArrayList<>();
 
-        varList.add(buildEnvVar(ENV_VAR_CRUISE_CONTROL_METRICS_ENABLED, String.valueOf(isMetricsEnabled)));
-        varList.add(buildEnvVar(ENV_VAR_STRIMZI_KAFKA_BOOTSTRAP_SERVERS, KafkaResources.bootstrapServiceName(cluster) + ":" + KafkaCluster.REPLICATION_PORT));
-        varList.add(buildEnvVar(ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED, String.valueOf(gcLoggingEnabled)));
-        varList.add(buildEnvVar(ENV_VAR_MIN_INSYNC_REPLICAS, String.valueOf(minInsyncReplicas)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CRUISE_CONTROL_METRICS_ENABLED, String.valueOf(metrics.isEnabled())));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_STRIMZI_KAFKA_BOOTSTRAP_SERVERS, KafkaResources.bootstrapServiceName(cluster) + ":" + KafkaCluster.REPLICATION_PORT));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED, String.valueOf(gcLoggingEnabled)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_MIN_INSYNC_REPLICAS, String.valueOf(minInsyncReplicas)));
 
-        varList.add(buildEnvVar(ENV_VAR_CRUISE_CONTROL_CAPACITY_CONFIGURATION, capacity.toString()));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CRUISE_CONTROL_CAPACITY_CONFIGURATION, capacity.toString()));
 
-        varList.add(buildEnvVar(ENV_VAR_API_SSL_ENABLED,  String.valueOf(this.sslEnabled)));
-        varList.add(buildEnvVar(ENV_VAR_API_AUTH_ENABLED,  String.valueOf(this.authEnabled)));
-        varList.add(buildEnvVar(ENV_VAR_API_USER,  API_USER_NAME));
-        varList.add(buildEnvVar(ENV_VAR_API_PORT,  String.valueOf(REST_API_PORT)));
-        varList.add(buildEnvVar(ENV_VAR_API_HEALTHCHECK_PATH, API_HEALTHCHECK_PATH));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_API_SSL_ENABLED,  String.valueOf(this.sslEnabled)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_API_AUTH_ENABLED,  String.valueOf(this.authEnabled)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_API_USER,  API_USER_NAME));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_API_PORT,  String.valueOf(REST_API_PORT)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_API_HEALTHCHECK_PATH, API_HEALTHCHECK_PATH));
 
-        ModelUtils.heapOptions(varList, 75, 0L, getJvmOptions(), getResources());
-        ModelUtils.jvmPerformanceOptions(varList, getJvmOptions());
-        ModelUtils.jvmSystemProperties(varList, getJvmOptions());
+        JvmOptionUtils.heapOptions(varList, 75, 0L, jvmOptions, resources);
+        JvmOptionUtils.jvmPerformanceOptions(varList, jvmOptions);
+        JvmOptionUtils.jvmSystemProperties(varList, jvmOptions);
 
         if (configuration != null && !configuration.getConfiguration().isEmpty()) {
-            varList.add(buildEnvVar(ENV_VAR_CRUISE_CONTROL_CONFIGURATION, configuration.getConfiguration()));
+            varList.add(ContainerUtils.createEnvVar(ENV_VAR_CRUISE_CONTROL_CONFIGURATION, configuration.getConfiguration()));
         }
 
         // Add shared environment variables used for all containers
-        varList.addAll(getRequiredEnvVars());
+        varList.addAll(sharedEnvironmentProvider.variables());
 
-        addContainerEnvsToExistingEnvs(varList, templateCruiseControlContainerEnvVars);
+        ContainerUtils.addContainerEnvsToExistingEnvs(reconciliation, varList, templateContainer);
 
         return varList;
-    }
-
-    /**
-     * Generates the PodDisruptionBudget.
-     *
-     * @return The PodDisruptionBudget.
-     */
-    public PodDisruptionBudget generatePodDisruptionBudget() {
-        return createPodDisruptionBudget();
-    }
-
-    /**
-     * Generates the PodDisruptionBudgetV1Beta1.
-     *
-     * @return The PodDisruptionBudgetV1Beta1.
-     */
-    public io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget generatePodDisruptionBudgetV1Beta1() {
-        return createPodDisruptionBudgetV1Beta1();
-    }
-
-    @Override
-    protected String getDefaultLogConfigFileName() {
-        return "cruiseControlDefaultLoggingProperties";
-    }
-
-    @Override
-    protected String getServiceAccountName() {
-        return CruiseControlResources.serviceAccountName(cluster);
     }
 
     /**
@@ -486,7 +445,7 @@ public class CruiseControl extends AbstractModel {
      * @return The generated Secret.
      */
     public Secret generateApiSecret() {
-        return ModelUtils.createSecret(CruiseControlResources.apiSecretName(cluster), namespace, labels, createOwnerReference(), generateCruiseControlApiCredentials(), Collections.emptyMap(), Collections.emptyMap());
+        return ModelUtils.createSecret(CruiseControlResources.apiSecretName(cluster), namespace, labels, ownerReference, generateCruiseControlApiCredentials(), Collections.emptyMap(), Collections.emptyMap());
     }
 
     /**
@@ -521,8 +480,15 @@ public class CruiseControl extends AbstractModel {
         data.put(keyCertName + ".p12", cert.keyStoreAsBase64String());
         data.put(keyCertName + ".password", cert.storePasswordAsBase64String());
 
-        return createSecret(CruiseControlResources.secretName(cluster), data,
-                Collections.singletonMap(clusterCa.caCertGenerationAnnotation(), String.valueOf(clusterCa.certGeneration())));
+        return ModelUtils.createSecret(
+                CruiseControlResources.secretName(cluster),
+                namespace,
+                labels,
+                ownerReference,
+                data,
+                Map.of(clusterCa.caCertGenerationAnnotation(), String.valueOf(clusterCa.certGeneration())),
+                Map.of()
+        );
     }
 
     /**
@@ -534,75 +500,59 @@ public class CruiseControl extends AbstractModel {
      * @return The network policy.
      */
     public NetworkPolicy generateNetworkPolicy(String operatorNamespace, Labels operatorNamespaceLabels) {
-        List<NetworkPolicyIngressRule> rules = new ArrayList<>(1);
+        NetworkPolicyPeer clusterOperatorPeer = NetworkPolicyUtils.createPeer(Map.of(Labels.STRIMZI_KIND_LABEL, "cluster-operator"), NetworkPolicyUtils.clusterOperatorNamespaceSelector(namespace, operatorNamespace, operatorNamespaceLabels));
+
+        // List of network policy rules for all ports
+        List<NetworkPolicyIngressRule> rules = new ArrayList<>();
 
         // CO can access the REST API
-        NetworkPolicyIngressRule restApiRule = new NetworkPolicyIngressRuleBuilder()
-                .addNewPort()
-                    .withNewPort(REST_API_PORT)
-                    .withProtocol("TCP")
-                .endPort()
-                .build();
+        rules.add(NetworkPolicyUtils.createIngressRule(REST_API_PORT, List.of(clusterOperatorPeer)));
 
-        NetworkPolicyPeer clusterOperatorPeer = new NetworkPolicyPeerBuilder()
-                .withNewPodSelector() // cluster operator
-                .addToMatchLabels(Labels.STRIMZI_KIND_LABEL, "cluster-operator")
-                .endPodSelector()
-                .build();
-        ModelUtils.setClusterOperatorNetworkPolicyNamespaceSelector(clusterOperatorPeer, namespace, operatorNamespace, operatorNamespaceLabels);
-
-        restApiRule.setFrom(Collections.singletonList(clusterOperatorPeer));
-
-        rules.add(restApiRule);
-
-        if (isMetricsEnabled) {
-            NetworkPolicyIngressRule metricsRule = new NetworkPolicyIngressRuleBuilder()
-                    .addNewPort()
-                        .withNewPort(METRICS_PORT)
-                        .withProtocol("TCP")
-                    .endPort()
-                    .withFrom()
-                    .build();
-
-            rules.add(metricsRule);
+        // Everyone can access metrics
+        if (metrics.isEnabled()) {
+            rules.add(NetworkPolicyUtils.createIngressRule(MetricsModel.METRICS_PORT, List.of()));
         }
 
-        NetworkPolicy networkPolicy = new NetworkPolicyBuilder()
-                .withNewMetadata()
-                    .withName(CruiseControlResources.networkPolicyName(cluster))
-                    .withNamespace(namespace)
-                    .withLabels(labels.toMap())
-                    .withOwnerReferences(createOwnerReference())
-                .endMetadata()
-                .withNewSpec()
-                    .withNewPodSelector()
-                        .addToMatchLabels(Labels.STRIMZI_NAME_LABEL, CruiseControlResources.deploymentName(cluster))
-                    .endPodSelector()
-                .withIngress(rules)
-                .endSpec()
-                .build();
-
-        LOGGER.traceCr(reconciliation, "Created network policy {}", networkPolicy);
-        return networkPolicy;
-    }
-
-    @Override
-    public String getAncillaryConfigMapKeyLogConfig() {
-        return "log4j2.properties";
+        // Build the final network policy with all rules covering all the ports
+        return NetworkPolicyUtils.createNetworkPolicy(
+                CruiseControlResources.networkPolicyName(cluster),
+                namespace,
+                labels,
+                ownerReference,
+                rules
+        );
     }
 
     /**
-     * Transforms properties to log4j2 properties file format and adds property for reloading the config
+     * Generates a metrics and logging ConfigMap according to the configuration. If this operand doesn't support logging
+     * or metrics, they will nto be set.
      *
-     * @param properties map with properties
+     * @param metricsAndLogging     The external CMs with logging and metrics configuration
      *
-     * @return modified string with monitorInterval
+     * @return The generated ConfigMap
      */
-    @Override
-    public String createLog4jProperties(OrderedProperties properties) {
-        if (!properties.asMap().containsKey("monitorInterval")) {
-            properties.addPair("monitorInterval", "30");
-        }
-        return super.createLog4jProperties(properties);
+    public ConfigMap generateMetricsAndLogConfigMap(MetricsAndLogging metricsAndLogging) {
+        return ConfigMapUtils
+                .createConfigMap(
+                        CruiseControlResources.logAndMetricsConfigMapName(cluster),
+                        namespace,
+                        labels,
+                        ownerReference,
+                        ConfigMapUtils.generateMetricsAndLogConfigMapData(reconciliation, this, metricsAndLogging)
+                );
+    }
+
+    /**
+     * @return  Metrics Model instance for configuring Prometheus metrics
+     */
+    public MetricsModel metrics()   {
+        return metrics;
+    }
+
+    /**
+     * @return  Logging Model instance for configuring logging
+     */
+    public LoggingModel logging()   {
+        return logging;
     }
 }

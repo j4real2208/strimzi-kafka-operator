@@ -17,6 +17,7 @@ import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.bouncycastle.cert.CertIOException;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -32,6 +33,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.PublicKey;
 import java.security.Security;
+import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -78,7 +80,11 @@ public class SystemTestCertAndKeyBuilder {
         this.keyPair = keyPair;
         this.caCert = caCert;
         if (caCert != null) {
-            this.issuer = new X500Name(caCert.getCertificate().getSubjectDN().getName());
+            try {
+                this.issuer = new JcaX509CertificateHolder(caCert.getCertificate()).getSubject();
+            } catch (CertificateEncodingException e) {
+                throw new RuntimeException(e);
+            }
         }
         this.extensions = new ArrayList<>(extensions);
     }

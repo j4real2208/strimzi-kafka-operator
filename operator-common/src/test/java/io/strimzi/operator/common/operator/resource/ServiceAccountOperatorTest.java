@@ -16,6 +16,7 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
 import io.fabric8.kubernetes.client.dsl.NonNamespaceOperation;
 import io.fabric8.kubernetes.client.dsl.Resource;
+import io.fabric8.kubernetes.client.dsl.ServiceAccountResource;
 import io.strimzi.operator.common.Reconciliation;
 import io.vertx.core.Vertx;
 import io.vertx.junit5.Checkpoint;
@@ -39,7 +40,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-public class ServiceAccountOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, ServiceAccount, ServiceAccountList, Resource<ServiceAccount>> {
+public class ServiceAccountOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, ServiceAccount, ServiceAccountList, ServiceAccountResource> {
 
 
     @Override
@@ -49,14 +50,14 @@ public class ServiceAccountOperatorTest extends AbstractResourceOperatorTest<Kub
 
     @Override
     protected Class<? extends Resource> resourceType() {
-        return Resource.class;
+        return ServiceAccountResource.class;
     }
 
     @Override
-    protected ServiceAccount resource() {
+    protected ServiceAccount resource(String name) {
         return new ServiceAccountBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo", "bar"))
                 .endMetadata()
@@ -64,10 +65,10 @@ public class ServiceAccountOperatorTest extends AbstractResourceOperatorTest<Kub
     }
 
     @Override
-    protected ServiceAccount modifiedResource() {
+    protected ServiceAccount modifiedResource(String name) {
         return new ServiceAccountBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo2", "bar2"))
                 .endMetadata()
@@ -80,7 +81,7 @@ public class ServiceAccountOperatorTest extends AbstractResourceOperatorTest<Kub
     }
 
     @Override
-    protected AbstractResourceOperator<KubernetesClient, ServiceAccount, ServiceAccountList, Resource<ServiceAccount>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
+    protected AbstractNamespacedResourceOperator<KubernetesClient, ServiceAccount, ServiceAccountList, ServiceAccountResource> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
         return new ServiceAccountOperator(vertx, mockClient);
     }
 
@@ -117,8 +118,6 @@ public class ServiceAccountOperatorTest extends AbstractResourceOperatorTest<Kub
                 verify(mockResource, never()).patch(any(), any());
                 verify(mockResource, never()).create();
                 verify(mockResource, never()).create();
-                verify(mockResource, never()).createOrReplace();
-                //verify(mockCms, never()).createOrReplace(any());
                 async.flag();
             }));
     }

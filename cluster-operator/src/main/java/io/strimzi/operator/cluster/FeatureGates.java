@@ -14,14 +14,18 @@ import static java.util.Arrays.asList;
  * Class for handling the configuration of feature gates
  */
 public class FeatureGates {
-    public static final FeatureGates NONE = new FeatureGates("");
+    /* test */ static final FeatureGates NONE = new FeatureGates("");
 
-    private static final String USE_STRIMZI_POD_SETS = "UseStrimziPodSets";
     private static final String USE_KRAFT = "UseKRaft";
+    private static final String STABLE_CONNECT_IDENTITIES = "StableConnectIdentities";
+    private static final String KAFKA_NODE_POOLS = "KafkaNodePools";
+    private static final String UNIDIRECTIONAL_TOPIC_OPERATOR = "UnidirectionalTopicOperator";
 
     // When adding new feature gates, do not forget to add them to allFeatureGates() and toString() methods
-    private final FeatureGate useStrimziPodSets = new FeatureGate(USE_STRIMZI_POD_SETS, true);
     private final FeatureGate useKRaft = new FeatureGate(USE_KRAFT, false);
+    private final FeatureGate stableConnectIdentities = new FeatureGate(STABLE_CONNECT_IDENTITIES, true);
+    private final FeatureGate kafkaNodePools = new FeatureGate(KAFKA_NODE_POOLS, false);
+    private final FeatureGate unidirectionalTopicOperator = new FeatureGate(UNIDIRECTIONAL_TOPIC_OPERATOR, false);
 
     /**
      * Constructs the feature gates configuration.
@@ -43,11 +47,17 @@ public class FeatureGates {
                 featureGate = featureGate.substring(1);
 
                 switch (featureGate) {
-                    case USE_STRIMZI_POD_SETS:
-                        setValueOnlyOnce(useStrimziPodSets, value);
-                        break;
                     case USE_KRAFT:
                         setValueOnlyOnce(useKRaft, value);
+                        break;
+                    case STABLE_CONNECT_IDENTITIES:
+                        setValueOnlyOnce(stableConnectIdentities, value);
+                        break;
+                    case KAFKA_NODE_POOLS:
+                        setValueOnlyOnce(kafkaNodePools, value);
+                        break;
+                    case UNIDIRECTIONAL_TOPIC_OPERATOR:
+                        setValueOnlyOnce(unidirectionalTopicOperator, value);
                         break;
                     default:
                         throw new InvalidConfigurationException("Unknown feature gate " + featureGate + " found in the configuration");
@@ -59,13 +69,13 @@ public class FeatureGates {
     }
 
     /**
-     * Validates any dependencies between various feature gates. For example, the UseKRaft feature gate can be
-     * enabled only when UseStrimziPodSets is enabled as well. When the dependencies are not satisfied,
+     * Validates any dependencies between various feature gates. For example, the UseKRaft feature gate can be enabled
+     * only when KafkaNodePools feature gate is enabled as well. When the dependencies are not satisfied,
      * InvalidConfigurationException is thrown.
      */
     private void validateInterDependencies()    {
-        if (useKRaftEnabled() && !useStrimziPodSetsEnabled())   {
-            throw new InvalidConfigurationException("The UseKRaft feature gate can be enabled only when the UseStrimziPodSets feature gate is enabled as well.");
+        if (useKRaftEnabled() && !kafkaNodePoolsEnabled())  {
+            throw new InvalidConfigurationException("The UseKRaft feature gate can be enabled only together with the KafkaNodePools feature gate.");
         }
     }
 
@@ -85,17 +95,31 @@ public class FeatureGates {
     }
 
     /**
-     * @return  Returns true when the UseStrimziPodSets feature gate is enabled
-     */
-    public boolean useStrimziPodSetsEnabled() {
-        return useStrimziPodSets.isEnabled();
-    }
-
-    /**
      * @return  Returns true when the UseKRaft feature gate is enabled
      */
     public boolean useKRaftEnabled() {
         return useKRaft.isEnabled();
+    }
+
+    /**
+     * @return  Returns true when the StableConnectIdentities feature gate is enabled
+     */
+    public boolean stableConnectIdentitiesEnabled() {
+        return stableConnectIdentities.isEnabled();
+    }
+
+    /**
+     * @return  Returns true when the KafkaNodePools feature gate is enabled
+     */
+    public boolean kafkaNodePoolsEnabled() {
+        return kafkaNodePools.isEnabled();
+    }
+
+    /**
+     * @return  Returns true when the UnidirectionalTopicOperator feature gate is enabled
+     */
+    public boolean unidirectionalTopicOperatorEnabled() {
+        return unidirectionalTopicOperator.isEnabled();
     }
 
     /**
@@ -105,16 +129,20 @@ public class FeatureGates {
      */
     /*test*/ List<FeatureGate> allFeatureGates()  {
         return List.of(
-                useStrimziPodSets,
-                useKRaft
+                useKRaft,
+                stableConnectIdentities,
+                kafkaNodePools,
+                unidirectionalTopicOperator
         );
     }
 
     @Override
     public String toString() {
         return "FeatureGates(" +
-                "UseStrimziPodSets=" + useStrimziPodSets.isEnabled() + "," +
-                "UseKRaft=" + useKRaft.isEnabled() +
+                "UseKRaft=" + useKRaft.isEnabled() + "," +
+                "StableConnectIdentities=" + stableConnectIdentities.isEnabled() + "," +
+                "KafkaNodePools=" + kafkaNodePools.isEnabled() + "," +
+                "UnidirectionalTopicOperator=" + unidirectionalTopicOperator.isEnabled() +
                 ")";
     }
 

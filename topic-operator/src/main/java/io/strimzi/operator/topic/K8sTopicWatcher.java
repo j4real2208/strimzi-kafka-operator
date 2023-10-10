@@ -17,6 +17,7 @@ import io.vertx.core.Handler;
 import java.util.Map;
 import java.util.Objects;
 
+/** Kubernetes Topic Watcher which is used to trigger reconciliation  */
 class K8sTopicWatcher implements Watcher<KafkaTopic> {
 
     private final static ReconciliationLogger LOGGER = ReconciliationLogger.create(K8sTopicWatcher.class);
@@ -25,18 +26,31 @@ class K8sTopicWatcher implements Watcher<KafkaTopic> {
 
     private TopicOperator topicOperator;
 
+    /**
+     * Constructor
+     *
+     * @param topicOperator  Instance of the Topic Operator
+     * @param initReconcileFuture  Future of initial event for topic during initial reconcile
+     * @param onHttpGoneTask  Runnable use to create/run the thread
+     */
     public K8sTopicWatcher(TopicOperator topicOperator, Future<Void> initReconcileFuture, Runnable onHttpGoneTask) {
         this.topicOperator = topicOperator;
         this.initReconcileFuture = initReconcileFuture;
         this.onHttpGoneTask = onHttpGoneTask;
     }
 
+    /**
+     * Process Kubernetes events based on actions performed on KafkaTopic
+     *
+     * @param action      Kubernetes action performed
+     * @param kafkaTopic  The Kafka topic resource
+     */
     @Override
     public void eventReceived(Action action, KafkaTopic kafkaTopic) {
         ObjectMeta metadata = kafkaTopic.getMetadata();
         Map<String, String> labels = metadata.getLabels();
+        LogContext logContext = LogContext.kubeWatch(action, kafkaTopic).withKubeTopic(kafkaTopic);
         if (kafkaTopic.getSpec() != null) {
-            LogContext logContext = LogContext.kubeWatch(action, kafkaTopic).withKubeTopic(kafkaTopic);
             String name = metadata.getName();
             String kind = kafkaTopic.getKind();
             if (!initReconcileFuture.isComplete()) {
@@ -77,9 +91,19 @@ class K8sTopicWatcher implements Watcher<KafkaTopic> {
                     LOGGER.debugCr(logContext.toReconciliation(), "Ignoring {} to {} {} because metadata.generation==status.observedGeneration", action, kind, name);
                 }
             }
+        } else {
+            LOGGER.warnCr(logContext.toReconciliation(), "Topic has no spec");
         }
     }
 
+    /**
+     * Decides whether reconciliation is needed or not
+     *
+     * @param kafkaTopic              The Kafka topic resource
+     * @param metadata                Object metadata
+     * @param pauseAnnotationChanged  Pause the Kafka topic reconciliation or not
+     * @return  Returns a boolean value based on whether reconciliation is required or not
+     */
     public boolean shouldReconcile(KafkaTopic kafkaTopic, ObjectMeta metadata, boolean pauseAnnotationChanged) {
         return kafkaTopic.getStatus() == null // Not status => new KafkaTopic
                 // KT has changed
@@ -88,6 +112,12 @@ class K8sTopicWatcher implements Watcher<KafkaTopic> {
                 || pauseAnnotationChanged;
     }
 
+    /**
+     * Check whether the paused annotation is changed in Kafka topic resource
+     *
+     * @param kafkaTopic              The Kafka topic resource
+     * @return Returns paused annotation changes which depicts whether the annotation is now moved from unpaused to paused or paused to unpaused.
+     */
     private PauseAnnotationChanges pausedAnnotationChanged(KafkaTopic kafkaTopic) {
         boolean pausedByAnno = Annotations.isReconciliationPausedWithAnnotation(kafkaTopic.getMetadata());
         boolean pausedInStatus = kafkaTopic.getStatus() != null && kafkaTopic.getStatus().getConditions().stream().anyMatch(condition -> "ReconciliationPaused".equals(condition.getType()));
@@ -97,7 +127,11 @@ class K8sTopicWatcher implements Watcher<KafkaTopic> {
 
     }
 
-
+    /**
+     * Close the topic watcher
+     *
+     * @param exception     Watcher Exception
+     */
     @Override
     public void onClose(WatcherException exception) {
         LOGGER.debugOp("Closing {}", this);
@@ -117,15 +151,15 @@ class K8sTopicWatcher implements Watcher<KafkaTopic> {
             this.isChanged = this.resourcePausedByAnno || this.resourceUnpausedByAnno;
         }
 
-        public boolean isResourcePausedByAnno() {
+        private boolean isResourcePausedByAnno() {
             return resourcePausedByAnno;
         }
 
-        public boolean isResourceUnpausedByAnno() {
+        private boolean isResourceUnpausedByAnno() {
             return resourceUnpausedByAnno;
         }
 
-        public boolean isChanged() {
+        private boolean isChanged() {
             return isChanged;
         }
     }

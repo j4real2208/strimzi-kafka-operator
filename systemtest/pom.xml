@@ -5,7 +5,7 @@
     <parent>
         <artifactId>strimzi</artifactId>
         <groupId>io.strimzi</groupId>
-        <version>0.32.0-SNAPSHOT</version>
+        <version>0.38.0-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>systemtest</artifactId>
@@ -13,6 +13,9 @@
     <properties>
         <skipTests>true</skipTests>
         <failsafe.forkCount>0</failsafe.forkCount>
+
+        <!-- Points to the root directory of the Strimzi project directory and can be used for fixed location to configuration files -->
+        <strimziRootDirectory>${basedir}${file.separator}..</strimziRootDirectory>
     </properties>
 
     <dependencies>
@@ -27,7 +30,7 @@
         <dependency>
             <groupId>org.valid4j</groupId>
             <artifactId>json-path-matchers</artifactId>
-            <scope>compile</scope>
+            <scope>test</scope>
             <exclusions>
                 <exclusion>
                     <groupId>org.hamcrest</groupId>
@@ -55,6 +58,11 @@
         </dependency>
         <dependency>
             <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-httpclient-jdk</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.fabric8</groupId>
             <artifactId>kubernetes-client-api</artifactId>
         </dependency>
         <dependency>
@@ -64,6 +72,7 @@
         <dependency>
             <groupId>io.fabric8</groupId>
             <artifactId>kubernetes-model-storageclass</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.fabric8</groupId>
@@ -88,6 +97,7 @@
         <dependency>
             <groupId>io.fabric8</groupId>
             <artifactId>openshift-model</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.fabric8</groupId>
@@ -193,11 +203,6 @@
             <scope>compile</scope>
         </dependency>
         <dependency>
-            <groupId>io.strimzi</groupId>
-            <artifactId>kafka-oauth-client</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
@@ -207,12 +212,12 @@
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcpkix-jdk15on</artifactId>
+            <artifactId>bcpkix-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcprov-jdk15on</artifactId>
+            <artifactId>bcprov-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
         <dependency>
@@ -226,6 +231,14 @@
             <artifactId>sundr-core</artifactId>
             <version>${sundrio.version}</version>
             <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-model-coordination</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>openshift-model-operatorhub</artifactId>
         </dependency>
     </dependencies>
 
@@ -243,6 +256,7 @@
                             <goal>compile</goal>
                         </goals>
                         <configuration>
+                            <useIncrementalCompilation>false</useIncrementalCompilation>
                             <compilerArgs combine.self="override">
                                 <arg>-Xlint:deprecation</arg>
                             </compilerArgs>
@@ -333,6 +347,14 @@
         </profile>
 
         <profile>
+            <id>upgrade</id>
+            <properties>
+                <skipTests>false</skipTests>
+                <groups>upgrade</groups>
+            </properties>
+        </profile>
+
+        <profile>
             <id>operators</id>
             <properties>
                 <skipTests>false</skipTests>
@@ -346,6 +368,7 @@
                     !security/**/*ST,
                     !rollingupdate/**/*ST,
                     !watcher/**/*ST,
+                    !rollingupdate/**/*ST,
                     !tracing/**/*ST
                 </it.test>
             </properties>
@@ -365,6 +388,7 @@
                     security/**/*ST,
                     rollingupdate/**/*ST,
                     watcher/**/*ST,
+                    rollingupdate/**/*ST,
                     tracing/**/*ST
                 </it.test>
             </properties>
@@ -374,7 +398,7 @@
             <id>azp_kafka_oauth</id>
             <properties>
                 <skipTests>false</skipTests>
-                <groups>regression</groups>
+                <groups>regression,kafkasmoke</groups>
                 <it.test>
                     kafka/**/*ST,
                     !kafka/listeners/*ST,
@@ -497,7 +521,7 @@
                 <skipTests>false</skipTests>
                 <groups>upgrade</groups>
                 <it.test>
-                    !KafkaUpgradeDowngradeIsolatedST
+                    !KafkaUpgradeDowngradeST
                 </it.test>
             </properties>
         </profile>
@@ -508,9 +532,43 @@
                 <skipTests>false</skipTests>
                 <groups>upgrade</groups>
                 <it.test>
-                    KafkaUpgradeDowngradeIsolatedST
+                    KafkaUpgradeDowngradeST
                 </it.test>
             </properties>
         </profile>
+
+        <profile>
+            <id>azp_bridge</id>
+            <properties>
+                <skipTests>false</skipTests>
+                <groups>bridge</groups>
+                <it.test>
+                    !olm/**/*ST,
+                </it.test>
+            </properties>
+        </profile>
+
+        <profile>
+            <id>scalability</id>
+            <properties>
+                <skipTests>false</skipTests>
+                <groups>
+                    all,scalability
+                </groups>
+            </properties>
+        </profile>
+
+        <profile>
+            <id>olm_acceptance_upgrade</id>
+            <properties>
+                <skipTests>false</skipTests>
+                <groups>
+                    acceptance,
+                    olm,
+                    olmupgrade
+                </groups>
+            </properties>
+        </profile>
+
     </profiles>
 </project>

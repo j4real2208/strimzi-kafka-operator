@@ -8,10 +8,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -22,7 +20,6 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLParser;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.OwnerReference;
-import io.vertx.core.VertxException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -38,10 +35,9 @@ import java.io.PrintWriter;
 import java.io.Reader;
 import java.io.StringWriter;
 import java.io.Writer;
+import java.net.ServerSocket;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.net.UnknownHostException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -55,15 +51,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringTokenizer;
-import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
-import java.util.stream.Collector;
-import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 
 @SuppressWarnings({"checkstyle:ClassFanOutComplexity"})
 public final class TestUtils {
@@ -92,7 +90,19 @@ public final class TestUtils {
 
     public static final String CRD_KAFKA_REBALANCE = USER_PATH + "/../packaging/install/cluster-operator/049-Crd-kafkarebalance.yaml";
 
+    public static final String CRD_KAFKA_NODE_POOL = USER_PATH + "/../packaging/install/cluster-operator/04A-Crd-kafkanodepool.yaml";
+
     public static final String CRD_STRIMZI_POD_SET = USER_PATH + "/../packaging/install/cluster-operator/042-Crd-strimzipodset.yaml";
+
+    /**
+     * Default timeout for asynchronous tests.
+     */
+    public static final int DEFAULT_TIMEOUT_DURATION = 30;
+
+    /**
+     * Default timeout unit for asynchronous tests.
+     */
+    public static final TimeUnit DEFAULT_TIMEOUT_UNIT = TimeUnit.SECONDS;
 
     private TestUtils() {
         // All static methods
@@ -113,7 +123,7 @@ public final class TestUtils {
 
     /**
      * Poll the given {@code ready} function every {@code pollIntervalMs} milliseconds until it returns true,
-     * or throw a WaitException if it doesn't returns true within {@code timeoutMs} milliseconds.
+     * or throw a WaitException if it doesn't return true within {@code timeoutMs} milliseconds.
      * @return The remaining time left until timeout occurs
      * (helpful if you have several calls which need to share a common timeout),
      * */
@@ -195,7 +205,7 @@ public final class TestUtils {
     public static String getFileAsString(String filePath) {
         try {
             LOGGER.info(filePath);
-            return new String(Files.readAllBytes(Paths.get(filePath)), "UTF-8");
+            return Files.readString(Paths.get(filePath));
         } catch (IOException e) {
             LOGGER.info("File with path {} not found", filePath);
         }
@@ -214,10 +224,8 @@ public final class TestUtils {
             if (url == null) {
                 return null;
             } else {
-                return new String(
-                        Files.readAllBytes(Paths.get(
-                                url.toURI())),
-                        StandardCharsets.UTF_8);
+                return Files.readString(Paths.get(
+                        url.toURI()));
             }
         } catch (IOException | URISyntaxException e) {
             throw new RuntimeException(e);
@@ -232,9 +240,9 @@ public final class TestUtils {
     public static String readResource(InputStream stream) {
         StringBuilder textBuilder = new StringBuilder();
         try (Reader reader = new BufferedReader(new InputStreamReader(
-                stream, Charset.forName(StandardCharsets.UTF_8.name()))
+                stream, StandardCharsets.UTF_8)
         )) {
-            int character = 0;
+            int character;
             while ((character = reader.read()) != -1) {
                 textBuilder.append((char) character);
             }
@@ -249,26 +257,11 @@ public final class TestUtils {
             if (file == null) {
                 return null;
             } else {
-                return new String(
-                        Files.readAllBytes(file.toPath()),
-                        StandardCharsets.UTF_8);
+                return Files.readString(file.toPath());
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-    }
-
-    /**
-     * Assert that the given actual string is the same as content of the
-     * the classpath resource resourceName.
-     * @param cls The class relative to which the resource will be loaded.
-     * @param resourceName The name of the resource
-     * @param actual The actual
-     * @throws IOException
-     */
-    public static void assertResourceMatch(Class<?> cls, String resourceName, String actual) throws IOException {
-        String r = readResource(cls, resourceName);
-        assertThat(actual, is(r));
     }
 
     @SafeVarargs
@@ -307,18 +300,6 @@ public final class TestUtils {
             throw new IllegalArgumentException(e);
         } catch (IOException e) {
             throw new RuntimeException(e);
-        }
-    }
-
-    public static String fromYamlToJson(String yaml) {
-        try {
-            ObjectMapper yamlReader = new ObjectMapper(new YAMLFactory());
-            Object obj = yamlReader.readValue(yaml, Object.class);
-
-            ObjectMapper jsonWriter = new ObjectMapper();
-            return jsonWriter.configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true).writeValueAsString(obj);
-        } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException(e);
         }
     }
 
@@ -369,22 +350,6 @@ public final class TestUtils {
         }
     }
 
-    /** @deprecated you should be using yaml, no json */
-    @Deprecated
-    public static <T> T fromJson(String json, Class<T> c) {
-        if (json == null) {
-            return null;
-        }
-        ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        try {
-            return mapper.readValue(json, c);
-        } catch (JsonMappingException e) {
-            throw new IllegalArgumentException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     public static String toJsonString(Object instance) {
         ObjectMapper mapper = new ObjectMapper()
                 .setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -398,10 +363,6 @@ public final class TestUtils {
     /** Map Streams utility methods */
     public static <K, V> Map.Entry<K, V> entry(K key, V value) {
         return new AbstractMap.SimpleEntry<>(key, value);
-    }
-
-    public static <K, U> Collector<Map.Entry<K, U>, ?, Map<K, U>> entriesToMap() {
-        return Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue);
     }
 
     /** Method to create and write file */
@@ -425,17 +386,27 @@ public final class TestUtils {
         }
     }
 
-    public static void checkOwnerReference(OwnerReference ownerRef, HasMetadata resource)  {
+    public static void checkOwnerReference(HasMetadata resource, HasMetadata parent)  {
         assertThat(resource.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(resource.getMetadata().getOwnerReferences().get(0), is(ownerRef));
+
+        OwnerReference or = resource.getMetadata().getOwnerReferences().get(0);
+
+        assertThat(or.getApiVersion(), is(parent.getApiVersion()));
+        assertThat(or.getKind(), is(parent.getKind()));
+        assertThat(or.getName(), is(parent.getMetadata().getName()));
+        assertThat(or.getUid(), is(parent.getMetadata().getUid()));
+        assertThat(or.getBlockOwnerDeletion(), is(false));
+        assertThat(or.getController(), is(false));
     }
 
     /**
      * Changes the {@code subject} of the RoleBinding in the given YAML resource to be the
      * {@code strimzi-cluster-operator} {@code ServiceAccount} in the given namespace.
-     * @param roleBindingFile
-     * @param namespace
-     * @return role
+     *
+     * @param roleBindingFile   The RoleBinding YAML file to load and change
+     * @param namespace         Namespace of the service account which should be the subject of this RoleBinding
+     *
+     * @return Modified RoleBinding resource YAML
      */
     public static String changeRoleBindingSubject(File roleBindingFile, String namespace) {
         YAMLMapper mapper = new YAMLMapper();
@@ -446,18 +417,6 @@ public final class TestUtils {
             subject.put("kind", "ServiceAccount")
                     .put("name", "strimzi-cluster-operator")
                     .put("namespace", namespace);
-            return mapper.writeValueAsString(node);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public static String setMetadataNamespace(File roleBindingFile, String namespace) {
-        YAMLMapper mapper = new YAMLMapper();
-        try {
-            JsonNode node = mapper.readTree(roleBindingFile);
-            ObjectNode metadata = (ObjectNode) node.get("metadata");
-            metadata.put("namespace", namespace);
             return mapper.writeValueAsString(node);
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -492,38 +451,58 @@ public final class TestUtils {
     }
 
     /**
-     * Repeat request n-times in a row in case of call failed
+     * Finds a free server port which can be used by the web server
      *
-     * @param retry count of remaining retries
-     * @param fn    request function
-     * @return The result of the successful call to {@code fn}.
+     * @return A free TCP port
      */
-    public static <T> T doRequestTillSuccess(int retry, Callable<T> fn, Optional<Runnable> reconnect) throws Exception {
-        try {
-            return fn.call();
-        } catch (Exception ex) {
-            if (ex.getCause() instanceof VertxException && ex.getCause().getMessage().contains("Connection was closed")) {
-                if (reconnect.isPresent()) {
-                    LOGGER.warn("connection was closed, trying to reconnect...");
-                    reconnect.get().run();
-                }
-            }
-            if ((ex.getCause() instanceof UnknownHostException || ex.getCause() instanceof IllegalStateException) && retry > 0) {
-                try {
-                    LOGGER.info("{} remaining iterations", retry);
-                    return doRequestTillSuccess(retry - 1, fn, reconnect);
-                } catch (Exception ex2) {
-                    throw ex2;
-                }
-            } else {
-                LOGGER.info(ex.getClass().getName());
-                if (ex.getCause() != null) {
-                    ex.getCause().printStackTrace();
-                } else {
-                    ex.printStackTrace();
-                }
-                throw ex;
-            }
+    public static int getFreePort()   {
+        try (ServerSocket serverSocket = new ServerSocket(0)) {
+            return serverSocket.getLocalPort();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to find free port", e);
         }
+    }
+
+    /**
+     * Awaits completion of the given stage using the default timeout.
+     *
+     * @param stage the stage to await completion
+     */
+    public static <T> T await(CompletionStage<T> stage) {
+        return await(stage, DEFAULT_TIMEOUT_DURATION, DEFAULT_TIMEOUT_UNIT);
+    }
+
+    /**
+     * Awaits completion of the given stage using the given timeout and unit.
+     *
+     * @param stage the stage to await completion
+     * @param timeout the amount of time to wait for completion
+     * @param unit the unit of time give by the timeout parameter
+     */
+    public static <T> T await(CompletionStage<T> stage, long timeout, TimeUnit unit) {
+        try {
+            return stage.toCompletableFuture().get(timeout, unit);
+        } catch (InterruptedException e) {
+            throw new RuntimeException("Interrupted waiting for CompletionStage", e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("CompletionStage failed to complete", e.getCause());
+        } catch (TimeoutException e) {
+            throw new RuntimeException("CompletionStage timed out", e);
+        }
+    }
+
+    /**
+     * Asserts that the given error is null, indicating that the result of an
+     * asynchronous execution stage completed successfully. This method is meant to
+     * be used with
+     * {@link CompletionStage#whenComplete(java.util.function.BiConsumer)
+     * CompletionStage#whenComplete} to easily assert success without modifying the
+     * result.
+     *
+     * @param unused the result of a completion stage, unused by this method
+     * @param error an error thrown by the an earlier completion stage
+     */
+    public static void assertSuccessful(Object unused, Throwable error) {
+        assertThat(error, is(nullValue()));
     }
 }

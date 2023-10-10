@@ -15,14 +15,13 @@ import java.util.Map;
 
 import static io.strimzi.systemtest.enums.CustomResourceStatus.NotReady;
 import static io.strimzi.systemtest.enums.CustomResourceStatus.Ready;
-import static io.strimzi.test.k8s.KubeClusterResource.kubeClient;
 
 public class KafkaMirrorMaker2Utils {
 
     private KafkaMirrorMaker2Utils() {}
 
     /**
-     * Wait until KafkaMirrorMaker2 will be in desired state
+     * Wait for KafkaMirrorMaker2 to be in desired state
      * @param namespaceName name of the namespace
      * @param clusterName name of KafkaMirrorMaker2 cluster
      * @param state desired state
@@ -33,33 +32,21 @@ public class KafkaMirrorMaker2Utils {
     }
 
     /**
-     * Wait until KafkaMirrorMaker2 will be in desired state
+     * Wait for KafkaMirrorMaker2 to be in desired state
+     * @param namespaceName name of the namespace
      * @param clusterName name of KafkaMirrorMaker2 cluster
-     * @param state desired state
      */
-    public static boolean waitForKafkaMirrorMaker2Status(String clusterName, Enum<?> state) {
-        return waitForKafkaMirrorMaker2Status(kubeClient().getNamespace(), clusterName, state);
-    }
-
     public static boolean waitForKafkaMirrorMaker2Ready(String namespaceName, String clusterName) {
         return waitForKafkaMirrorMaker2Status(namespaceName, clusterName, Ready);
-    }
-
-    public static boolean waitForKafkaMirrorMaker2Ready(String clusterName) {
-        return waitForKafkaMirrorMaker2Status(clusterName, Ready);
     }
 
     public static boolean waitForKafkaMirrorMaker2NotReady(final String namespaceName, String clusterName) {
         return waitForKafkaMirrorMaker2Status(namespaceName, clusterName, NotReady);
     }
 
-    public static boolean waitForKafkaMirrorMaker2NotReady(String clusterName) {
-        return waitForKafkaMirrorMaker2Status(clusterName, NotReady);
-    }
-
     @SuppressWarnings("unchecked")
     public static void waitForKafkaMirrorMaker2ConnectorReadiness(String namespaceName, String clusterName) {
-        TestUtils.waitFor("KafkaMirrorMaker2 connectors readiness", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT, () -> {
+        TestUtils.waitFor("MirrorMaker2 connectors readiness", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT, () -> {
             KafkaMirrorMaker2Status kafkaMirrorMaker2Status = KafkaMirrorMaker2Resource.kafkaMirrorMaker2Client().inNamespace(namespaceName).withName(clusterName).get().getStatus();
             // There should be only three connectors in the status of MM2
             if (kafkaMirrorMaker2Status.getConnectors().size() != 3) {

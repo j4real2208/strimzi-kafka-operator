@@ -6,6 +6,7 @@ package io.strimzi.api.kafka.model.template;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import io.strimzi.api.annotations.DeprecatedProperty;
 import io.strimzi.api.kafka.model.Constants;
 import io.strimzi.api.kafka.model.UnknownPropertyPreserving;
 import io.strimzi.crdgenerator.annotations.Description;
@@ -29,7 +30,7 @@ import java.util.Map;
     "externalBootstrapRoute", "perPodRoute", "externalBootstrapIngress", "perPodIngress", "persistentVolumeClaim",
     "podDisruptionBudget", "kafkaContainer", "initContainer", "clusterCaCert", "serviceAccount", "jmxSecret"})
 @EqualsAndHashCode
-public class KafkaClusterTemplate implements Serializable, UnknownPropertyPreserving {
+public class KafkaClusterTemplate implements HasJmxSecretTemplate, Serializable, UnknownPropertyPreserving {
     private static final long serialVersionUID = 1L;
 
     private StatefulSetTemplate statefulset;
@@ -55,6 +56,8 @@ public class KafkaClusterTemplate implements Serializable, UnknownPropertyPreser
 
     @Description("Template for Kafka `StatefulSet`.")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @Deprecated
+    @DeprecatedProperty(description = "Support for StatefulSets was removed in Strimzi 0.35.0. This property is ignored.")
     public StatefulSetTemplate getStatefulset() {
         return statefulset;
     }

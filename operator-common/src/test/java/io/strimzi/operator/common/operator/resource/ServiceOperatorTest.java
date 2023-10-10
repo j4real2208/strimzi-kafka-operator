@@ -25,7 +25,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Map;
 
-public class ServiceOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, Service, ServiceList, ServiceResource<Service>> {
+public class ServiceOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, Service, ServiceList, ServiceResource<Service>> {
 
     @Override
     protected Class<KubernetesClient> clientType() {
@@ -38,11 +38,11 @@ public class ServiceOperatorTest extends AbstractResourceOperatorTest<Kubernetes
     }
 
     @Override
-    protected Service resource() {
+    protected Service resource(String name) {
         return new ServiceBuilder()
                 .withNewMetadata()
                     .withNamespace(NAMESPACE)
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                 .endMetadata()
                 .withNewSpec()
                     .withType("LoadBalancer")
@@ -51,8 +51,8 @@ public class ServiceOperatorTest extends AbstractResourceOperatorTest<Kubernetes
     }
 
     @Override
-    protected Service modifiedResource() {
-        return new ServiceBuilder(resource())
+    protected Service modifiedResource(String name) {
+        return new ServiceBuilder(resource(name))
                 .editSpec()
                     .withType("NodePort")
                 .endSpec()
@@ -158,7 +158,7 @@ public class ServiceOperatorTest extends AbstractResourceOperatorTest<Kubernetes
                 .build();
 
         ServiceOperator op = new ServiceOperator(vertx, client);
-        op.internalPatch(Reconciliation.DUMMY_RECONCILIATION, NAMESPACE, RESOURCE_NAME, current, desired);
+        op.internalUpdate(Reconciliation.DUMMY_RECONCILIATION, NAMESPACE, RESOURCE_NAME, current, desired);
 
         assertThat(desired.getMetadata().getAnnotations().get("field.cattle.io~1publicEndpoints"), equalTo("foo"));
         assertThat(desired.getMetadata().getAnnotations().get("cattle.io/test"), equalTo("bar"));
@@ -311,5 +311,46 @@ public class ServiceOperatorTest extends AbstractResourceOperatorTest<Kubernetes
         op.patchDualStackNetworking(current2, desired2);
         assertThat(current2.getSpec().getIpFamilyPolicy(), is(not(desired2.getSpec().getIpFamilyPolicy())));
         assertThat(current2.getSpec().getIpFamilies(), is(desired2.getSpec().getIpFamilies()));
+    }
+
+    @Test
+    public void testLoadBalancerClassPatching()  {
+        KubernetesClient client = mock(KubernetesClient.class);
+
+        Service current = new ServiceBuilder()
+                .withNewMetadata()
+                    .withNamespace(NAMESPACE)
+                    .withName(RESOURCE_NAME)
+                .endMetadata()
+                .withNewSpec()
+                    .withType("LoadBalancer")
+                    .withPorts(new ServicePortBuilder()
+                            .withName("port1")
+                            .withPort(1234)
+                            .withTargetPort(new IntOrString(1234))
+                            .build())
+                    .withLoadBalancerClass("service.k8s.aws/nlb")
+                .endSpec()
+                .build();
+
+        Service desired = new ServiceBuilder()
+                .withNewMetadata()
+                    .withNamespace(NAMESPACE)
+                    .withName(RESOURCE_NAME)
+                .endMetadata()
+                .withNewSpec()
+                    .withType("LoadBalancer")
+                    .withPorts(new ServicePortBuilder()
+                            .withName("port1")
+                            .withPort(1234)
+                            .withTargetPort(new IntOrString(1234))
+                            .build())
+                .endSpec()
+                .build();
+
+        ServiceOperator op = new ServiceOperator(vertx, client);
+        op.patchLoadBalancerClass(current, desired);
+
+        assertThat(current.getSpec().getLoadBalancerClass(), is(desired.getSpec().getLoadBalancerClass()));
     }
 }

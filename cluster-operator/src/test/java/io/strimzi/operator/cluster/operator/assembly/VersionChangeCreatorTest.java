@@ -14,7 +14,7 @@ import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.StrimziPodSetBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
-import io.strimzi.operator.cluster.KafkaUpgradeException;
+import io.strimzi.operator.cluster.model.KafkaUpgradeException;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
 import io.strimzi.operator.cluster.model.KafkaCluster;
@@ -699,6 +699,35 @@ public class VersionChangeCreatorTest {
     }
 
     @Test
+    public void testUpgradeWithIbpv(VertxTestContext context) {
+        String kafkaVersion = VERSIONS.defaultVersion().version();
+        String oldInterBrokerProtocolVersion = KafkaVersionTestUtils.PREVIOUS_PROTOCOL_VERSION;
+        String oldLogMessageFormatVersion = KafkaVersionTestUtils.PREVIOUS_FORMAT_VERSION;
+
+        VersionChangeCreator vcc = mockVersionChangeCreator(
+                mockKafka(kafkaVersion, oldInterBrokerProtocolVersion, null),
+                mockNewCluster(
+                        null,
+                        mockSps(kafkaVersion),
+                        mockUniformPods(kafkaVersion, oldInterBrokerProtocolVersion, oldLogMessageFormatVersion)
+                )
+        );
+
+        Checkpoint async = context.checkpoint();
+        vcc.reconcile().onComplete(context.succeeding(c -> context.verify(() -> {
+            assertThat(c.isNoop(), is(true));
+            assertThat(c.isDowngrade(), is(false));
+            assertThat(c.isUpgrade(), is(false));
+            assertThat(c.from(), is(VERSIONS.defaultVersion()));
+            assertThat(c.to(), is(VERSIONS.defaultVersion()));
+            assertThat(c.interBrokerProtocolVersion(), is(nullValue())); // Is null because it is set in the Kafka CR
+            assertThat(c.logMessageFormatVersion(), is(oldInterBrokerProtocolVersion)); // Mirrors the inter.broker.protocol.version
+
+            async.flag();
+        })));
+    }
+
+    @Test
     public void testUpgradeWithVeryOldSubversions(VertxTestContext context) {
         String oldKafkaVersion = KafkaVersionTestUtils.PREVIOUS_KAFKA_VERSION;
         String oldInterBrokerProtocolVersion = "2.0";
@@ -813,7 +842,7 @@ public class VersionChangeCreatorTest {
         Checkpoint async = context.checkpoint();
         vcc.reconcile().onComplete(context.failing(c -> context.verify(() -> {
             assertThat(c.getClass(), is(KafkaUpgradeException.class));
-            assertThat(c.getMessage(), is("Kafka Pods or StatefulSet exist, but do not contain the strimzi.io/kafka-version annotation to detect their version. Kafka upgrade cannot be detected."));
+            assertThat(c.getMessage(), is("Kafka Pods or StrimziPodSet exist, but do not contain the strimzi.io/kafka-version annotation to detect their version. Kafka upgrade cannot be detected."));
 
             async.flag();
         })));
@@ -1009,7 +1038,7 @@ public class VersionChangeCreatorTest {
         Checkpoint async = context.checkpoint();
         vcc.reconcile().onComplete(context.failing(c -> context.verify(() -> {
             assertThat(c.getClass(), is(KafkaUpgradeException.class));
-            assertThat(c.getMessage(), is("log.message.format.version (" + oldInterBrokerProtocolVersion + ") and inter.broker.protocol.version (" + oldLogMessageFormatVersion + ") used by the brokers have to be set and be lower or equal to the Kafka broker version we downgrade to (3.1.0)"));
+            assertThat(c.getMessage(), is("log.message.format.version (" + oldInterBrokerProtocolVersion + ") and inter.broker.protocol.version (" + oldLogMessageFormatVersion + ") used by the brokers have to be set and be lower or equal to the Kafka broker version we downgrade to (" + KafkaVersionTestUtils.PREVIOUS_KAFKA_VERSION + ")"));
 
             async.flag();
         })));
@@ -1038,7 +1067,7 @@ public class VersionChangeCreatorTest {
         Checkpoint async = context.checkpoint();
         vcc.reconcile().onComplete(context.failing(c -> context.verify(() -> {
             assertThat(c.getClass(), is(KafkaUpgradeException.class));
-            assertThat(c.getMessage(), is("log.message.format.version (" + oldInterBrokerProtocolVersion + ") and inter.broker.protocol.version (" + oldLogMessageFormatVersion + ") used by the brokers have to be set and be lower or equal to the Kafka broker version we downgrade to (3.1.0)"));
+            assertThat(c.getMessage(), is("log.message.format.version (" + oldInterBrokerProtocolVersion + ") and inter.broker.protocol.version (" + oldLogMessageFormatVersion + ") used by the brokers have to be set and be lower or equal to the Kafka broker version we downgrade to (" + KafkaVersionTestUtils.PREVIOUS_KAFKA_VERSION + ")"));
 
             async.flag();
         })));

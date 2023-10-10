@@ -25,13 +25,12 @@ import lombok.EqualsAndHashCode;
     "livenessProbe", "readinessProbe", "jvmOptions",  "jmxOptions",
     "logging", "clientRackInitImage", "rack", "metricsConfig", "tracing",
     "template", "externalConfiguration" })
-@EqualsAndHashCode(doNotUseGetters = true)
-public abstract class AbstractKafkaConnectSpec extends Spec implements HasConfigurableMetrics {
+@EqualsAndHashCode(doNotUseGetters = true, callSuper = true)
+public abstract class AbstractKafkaConnectSpec extends Spec implements HasConfigurableMetrics, HasConfigurableLogging, HasJmxOptions, HasLivenessProbe, HasReadinessProbe {
     private static final long serialVersionUID = 1L;
 
     private Logging logging;
-    private Integer replicas;
-
+    private int replicas = 3;
     private String version;
     private String image;
     private ResourceRequirements resources;
@@ -46,24 +45,27 @@ public abstract class AbstractKafkaConnectSpec extends Spec implements HasConfig
     private String clientRackInitImage;
     private Rack rack;
 
-    @Description("The number of pods in the Kafka Connect group.")
+    @Description("The number of pods in the Kafka Connect group. " +
+            "Defaults to `3`.")
     @JsonProperty(defaultValue = "3")
-    public Integer getReplicas() {
+    public int getReplicas() {
         return replicas;
+    }
+
+    public void setReplicas(int replicas) {
+        this.replicas = replicas;
     }
 
     @Description("Logging configuration for Kafka Connect")
     @JsonInclude(value = JsonInclude.Include.NON_EMPTY)
+    @Override
     public Logging getLogging() {
         return logging;
     }
 
+    @Override
     public void setLogging(Logging logging) {
         this.logging = logging;
-    }
-
-    public void setReplicas(Integer replicas) {
-        this.replicas = replicas;
     }
 
     @Description("The Kafka Connect version. Defaults to {DefaultKafkaVersion}. " +

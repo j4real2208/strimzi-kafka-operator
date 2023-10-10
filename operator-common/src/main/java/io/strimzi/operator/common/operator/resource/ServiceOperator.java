@@ -26,16 +26,19 @@ import java.util.stream.Collectors;
 /**
  * Operations for {@code Service}s.
  */
-public class ServiceOperator extends AbstractResourceOperator<KubernetesClient, Service, ServiceList, ServiceResource<Service>> {
-
+public class ServiceOperator extends AbstractNamespacedResourceOperator<KubernetesClient, Service, ServiceList, ServiceResource<Service>> {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(ServiceOperator.class);
-    protected static final Pattern IGNORABLE_PATHS = Pattern.compile(
+    private static final Pattern IGNORABLE_PATHS = Pattern.compile(
             "^(/metadata/managedFields" +
+                    "|/metadata/creationTimestamp" +
+                    "|/metadata/resourceVersion" +
+                    "|/metadata/generation" +
+                    "|/metadata/uid" +
                     "|/spec/sessionAffinity" +
                     "|/spec/clusterIP" +
                     "|/spec/clusterIPs" +
-                    "|/spec/ipFamily" + // Legacy field from Kube 1.19 and earlier. We just ignore it, it is not configurable.
                     "|/spec/ipFamilies" + // Immutable field
+                    "|/spec/internalTrafficPolicy" + // Set by Kubernetes to Cluster as default (not configurable through Strimzi as it does nto seem to make much sense for us, so we ignore it)
                     "|/status)$");
 
     private final EndpointOperator endpointOperations;
@@ -73,13 +76,13 @@ public class ServiceOperator extends AbstractResourceOperator<KubernetesClient, 
      * @param reconciliation The reconciliation
      * @param namespace Namespace of the service
      * @param name      Name of the service
-     * @param current   Current servicve
+     * @param current   Current service
      * @param desired   Desired Service
      *
      * @return  Future with reconciliation result
      */
     @Override
-    protected Future<ReconcileResult<Service>> internalPatch(Reconciliation reconciliation, String namespace, String name, Service current, Service desired) {
+    protected Future<ReconcileResult<Service>> internalUpdate(Reconciliation reconciliation, String namespace, String name, Service current, Service desired) {
         try {
             if (current.getSpec() != null && desired.getSpec() != null) {
                 if (("NodePort".equals(current.getSpec().getType()) && "NodePort".equals(desired.getSpec().getType()))
@@ -87,12 +90,13 @@ public class ServiceOperator extends AbstractResourceOperator<KubernetesClient, 
                     patchNodePorts(current, desired);
                     patchHealthCheckPorts(current, desired);
                     patchAnnotations(current, desired);
+                    patchLoadBalancerClass(current, desired);
                 }
 
                 patchDualStackNetworking(current, desired);
             }
 
-            return super.internalPatch(reconciliation, namespace, name, current, desired);
+            return super.internalUpdate(reconciliation, namespace, name, current, desired);
         } catch (Exception e) {
             LOGGER.errorCr(reconciliation, "Caught exception while patching {} {} in namespace {}", resourceKind, name, namespace, e);
             return Future.failedFuture(e);
@@ -179,6 +183,20 @@ public class ServiceOperator extends AbstractResourceOperator<KubernetesClient, 
     }
 
     /**
+     * In some environments, the loadBalancerClass field of a LoadBalancer type service gets set automatically. When
+     * patching the service, we keep the original class set by the infrastructure instead of overriding it.
+     *
+     * @param current   Current Service
+     * @param desired   Desired Service
+     */
+    protected void patchLoadBalancerClass(Service current, Service desired) {
+        if (current.getSpec().getLoadBalancerClass() != null
+                && desired.getSpec().getLoadBalancerClass() == null) {
+            desired.getSpec().setLoadBalancerClass(current.getSpec().getLoadBalancerClass());
+        }
+    }
+
+    /**
      * Deletes the resource with the given namespace and name and completes the given future accordingly.
      * This method will do a cascading delete.
      *
@@ -192,6 +210,17 @@ public class ServiceOperator extends AbstractResourceOperator<KubernetesClient, 
         return internalDelete(reconciliation, namespace, name, true);
     }
 
+    /**
+     * Waits for endpoint readiness
+     *
+     * @param reconciliation        Reconciliation marker
+     * @param namespace             Namespace
+     * @param name                  Name
+     * @param pollInterval          Interval in which it will poll for the readiness
+     * @param operationTimeoutMs    How long to wait for the endpoint to be ready
+     *
+     * @return  Future which completes when the endpoint is ready
+     */
     public Future<Void> endpointReadiness(Reconciliation reconciliation, String namespace, String name, long pollInterval, long operationTimeoutMs) {
         return endpointOperations.readiness(reconciliation, namespace, name, pollInterval, operationTimeoutMs);
     }

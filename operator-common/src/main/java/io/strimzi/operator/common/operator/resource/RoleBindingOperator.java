@@ -11,8 +11,10 @@ import io.fabric8.kubernetes.client.dsl.MixedOperation;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.vertx.core.Vertx;
 
-
-public class RoleBindingOperator extends AbstractResourceOperator<KubernetesClient, RoleBinding,
+/**
+ * Operator for managing Role Bindings
+ */
+public class RoleBindingOperator extends AbstractNamespacedResourceOperator<KubernetesClient, RoleBinding,
         RoleBindingList,
         Resource<RoleBinding>> {
     /**

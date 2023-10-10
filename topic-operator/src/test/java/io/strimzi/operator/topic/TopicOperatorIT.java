@@ -26,7 +26,7 @@ import io.strimzi.test.container.StrimziKafkaCluster;
 import kafka.server.KafkaConfig$;
 import org.apache.kafka.clients.admin.CreateTopicsResult;
 import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.junit.jupiter.api.AfterAll;
@@ -40,6 +40,7 @@ import static java.util.Collections.singletonMap;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class TopicOperatorIT extends TopicOperatorBaseIT {
     private static final Logger LOGGER = LogManager.getLogger(TopicOperatorIT.class);
@@ -59,14 +60,17 @@ public class TopicOperatorIT extends TopicOperatorBaseIT {
 
     @AfterAll
     public void afterAll() throws InterruptedException, ExecutionException, TimeoutException {
-        teardown(true);
-        teardownKubeCluster();
-        adminClient.close();
-        kafkaCluster.stop();
+        try {
+            teardown(true);
+        } finally {
+            teardownKubeCluster();
+            adminClient.close();
+            kafkaCluster.stop();
+        }
     }
 
     @AfterEach
-    void afterEach() throws InterruptedException, ExecutionException, TimeoutException {
+    void afterEach() throws InterruptedException, TimeoutException {
         // clean-up KafkaTopic resources in Kubernetes
         clearKafkaTopics(true);
     }
@@ -150,13 +154,13 @@ public class TopicOperatorIT extends TopicOperatorBaseIT {
         KafkaTopic changedTopic = new KafkaTopicBuilder(operation().inNamespace(NAMESPACE).withName(resourceName).get())
                 .editOrNewSpec().addToConfig("min.insync.replicas", "x").endSpec().build();
         KafkaTopic replaced = operation().inNamespace(NAMESPACE).withName(resourceName).replace(changedTopic);
-        assertStatusNotReady(topicName, InvalidRequestException.class,
+        assertStatusNotReady(topicName, InvalidConfigurationException.class,
                 expectedMessage);
         // Now modify Kafka-side to cause another reconciliation: We want the same status.
         alterTopicConfigInKafka(topicName, "compression.type", value -> "snappy".equals(value) ? "lz4" : "snappy");
         // Wait for a periodic reconciliation
         Thread.sleep(RECONCILIATION_INTERVAL + 10_000);
-        assertStatusNotReady(topicName, InvalidRequestException.class,
+        assertStatusNotReady(topicName, InvalidConfigurationException.class,
                 expectedMessage);
     }
 
@@ -200,7 +204,7 @@ public class TopicOperatorIT extends TopicOperatorBaseIT {
     public void testKafkaTopicAddedWithInvalidConfig() throws InterruptedException, ExecutionException, TimeoutException {
         createKafkaTopicResourceError("test-resource-created-with-invalid-config",
                 singletonMap("message.format.version", "zebra"), 1,
-               "org.apache.kafka.common.errors.InvalidConfigurationException: Invalid value zebra for configuration message.format.version: Version `zebra` is not a valid version");
+               "org.apache.kafka.common.errors.InvalidConfigurationException: Invalid value zebra for configuration message.format.version: Version zebra is not a valid version");
     }
 
     @Test
@@ -217,6 +221,29 @@ public class TopicOperatorIT extends TopicOperatorBaseIT {
         } catch (KubernetesClientException e) {
             assertThat(e.getMessage().contains("spec.partitions in body should be greater than or equal to 1"), is(true));
         }
+    }
+
+    @Test
+    public void testKafkaTopicAddedWithNoSpec() throws InterruptedException, TimeoutException {
+        String topicName = "test-resource-created-with-no-spec";
+        Topic topic = new Topic.Builder(topicName, 1, (short) 1, emptyMap()).build();
+
+        KafkaTopic kafkaTopic = TopicSerialization.toTopicResource(topic, labels);
+        kafkaTopic.setSpec(null);
+
+        operation().inNamespace(NAMESPACE).create(kafkaTopic);
+
+        // Wait for the resource to be created
+        waitFor(() -> {
+            KafkaTopic createdTopicResource = operation().inNamespace(NAMESPACE).withName(topicName).get();
+            LOGGER.info("Polled kafkatopic {} waiting for creation", topicName);
+
+            if (createdTopicResource != null) {
+                assertNull(createdTopicResource.getStatus());
+            }
+
+            return createdTopicResource != null;
+        }, "Expected the kafkatopic to have been created by now");
     }
 
     @Test

@@ -37,11 +37,17 @@ public class KafkaCrdIT extends AbstractCrdIT {
 
     @Test
     void testKafkaWithExtraProperty() {
+        // oc tool does not fail with extra properties, it shows only a warning. So this test does not pass on OpenShift
+        assumeKube();
+
         Throwable exception = assertThrows(
             KubeClusterException.class,
             () -> createDeleteCustomResource("Kafka-with-extra-property.yaml"));
 
-        assertThat(exception.getMessage(), containsString("unknown field \"thisPropertyIsNotInTheSchema\""));
+        assertThat(exception.getMessage(), anyOf(
+                containsString("unknown field \"thisPropertyIsNotInTheSchema\""),
+                containsString("unknown field \"spec.thisPropertyIsNotInTheSchema\"")
+        ));
     }
 
     @Test
@@ -74,6 +80,7 @@ public class KafkaCrdIT extends AbstractCrdIT {
         assertThat(exception.getMessage(),
                 anyOf(
                         containsStringIgnoringCase("invalid: spec.maintenanceTimeWindows: Invalid value: \"null\": spec.maintenanceTimeWindows in body must be of type string: \"null\""),
+                        containsStringIgnoringCase("invalid: spec.maintenanceTimeWindows[0]: Invalid value: \"null\": spec.maintenanceTimeWindows[0] in body must be of type string: \"null\""),
                         containsStringIgnoringCase("unknown object type \"nil\" in Kafka.spec.maintenanceTimeWindows[0]")
                 ));
     }
@@ -99,7 +106,8 @@ public class KafkaCrdIT extends AbstractCrdIT {
         assertThat(exception.getMessage(), anyOf(
                 containsStringIgnoringCase("spec.zookeeper.storage.type in body should be one of [ephemeral persistent-claim]"),
                 containsStringIgnoringCase("spec.zookeeper.storage.type: Unsupported value: \"jbod\": supported values: \"ephemeral\", \"persistent-claim\""),
-                containsStringIgnoringCase("unknown field \"volumes\" in io.strimzi.kafka.v1beta2.Kafka.spec.zookeeper.storage")));
+                containsStringIgnoringCase("unknown field \"volumes\" in io.strimzi.kafka.v1beta2.Kafka.spec.zookeeper.storage"),
+                containsStringIgnoringCase("unknown field \"spec.zookeeper.storage.volumes\"")));
     }
 
     @Test
@@ -139,31 +147,6 @@ public class KafkaCrdIT extends AbstractCrdIT {
         assertThat(exception.getMessage(), anyOf(
                 containsStringIgnoringCase("spec.zookeeper.jmxOptions.authentication.type in body should be one of [password]"),
                 containsStringIgnoringCase("spec.zookeeper.jmxOptions.authentication.type: Unsupported value: \"not-right\": supported values: \"password\"")));
-    }
-
-    @Test
-    void testJmxOptionsWithoutRequiredOutputDefinitionKeys() {
-        Throwable exception = assertThrows(
-            KubeClusterException.class,
-            () -> {
-                createDeleteCustomResource("JmxTrans-output-definition-with-missing-required-property.yaml");
-            });
-
-        assertMissingRequiredPropertiesMessage(exception.getMessage(), "outputType", "name");
-    }
-
-    @Test
-    void testJmxOptionsWithoutRequiredQueryKeys() {
-        Throwable exception = assertThrows(
-            KubeClusterException.class,
-            () -> {
-                createDeleteCustomResource("JmxTrans-queries-with-missing-required-property.yaml");
-            });
-
-        assertMissingRequiredPropertiesMessage(exception.getMessage(),
-                "targetMBean",
-                "attributes",
-                "outputs");
     }
 
     @BeforeAll

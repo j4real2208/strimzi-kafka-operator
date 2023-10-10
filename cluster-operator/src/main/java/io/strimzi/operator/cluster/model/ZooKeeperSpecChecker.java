@@ -5,7 +5,7 @@
 package io.strimzi.operator.cluster.model;
 
 import io.strimzi.api.kafka.model.status.Condition;
-import io.strimzi.operator.common.operator.resource.StatusUtils;
+import io.strimzi.operator.common.model.StatusUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +28,11 @@ public class ZooKeeperSpecChecker {
         this.zk = zk;
     }
 
+    /**
+     * Runs the spec checker
+     *
+     * @return  List of warning conditions
+     */
     public List<Condition> run() {
         List<Condition> warnings = new ArrayList<>();
         checkZooKeeperStorage(warnings);

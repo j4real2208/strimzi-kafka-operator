@@ -19,6 +19,7 @@ import io.strimzi.api.kafka.model.connect.build.JarArtifactBuilder;
 import io.strimzi.api.kafka.model.connect.build.PluginBuilder;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.common.Reconciliation;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.test.TestUtils;
 import io.strimzi.test.annotations.ParallelSuite;
@@ -32,12 +33,14 @@ import java.util.Map;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ParallelSuite
 public class KafkaConnectBuildTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
 
     private final String cluster = "my-connect";
     private final String namespace = "my-ns";
@@ -75,7 +78,7 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
     }
 
     @ParallelTest
@@ -97,7 +100,7 @@ public class KafkaConnectBuildTest {
                 .build();
 
         assertThrows(InvalidResourceException.class, () ->
-            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS)
+            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER)
         );
     }
 
@@ -121,7 +124,7 @@ public class KafkaConnectBuildTest {
                 .build();
 
         assertThrows(InvalidResourceException.class, () ->
-            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS)
+            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER)
         );
     }
 
@@ -146,7 +149,7 @@ public class KafkaConnectBuildTest {
                 .build();
 
         assertThrows(InvalidResourceException.class, () ->
-            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS)
+            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER)
         );
     }
 
@@ -180,18 +183,19 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
         assertThat(build.baseImage, is("my-source-image:latest"));
 
-        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, null);
+        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, "cf065b80ede090aa");
         assertThat(pod.getMetadata().getName(), is(KafkaConnectResources.buildPodName(cluster)));
         assertThat(pod.getMetadata().getNamespace(), is(namespace));
 
         Map<String, String> expectedDeploymentLabels = TestUtils.map(Labels.STRIMZI_CLUSTER_LABEL, this.cluster,
                 Labels.STRIMZI_NAME_LABEL, KafkaConnectResources.buildPodName(cluster),
                 Labels.STRIMZI_KIND_LABEL, KafkaConnect.RESOURCE_KIND,
-                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.APPLICATION_NAME,
+                Labels.STRIMZI_COMPONENT_TYPE_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
+                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
                 Labels.KUBERNETES_INSTANCE_LABEL, this.cluster,
                 Labels.KUBERNETES_PART_OF_LABEL, Labels.APPLICATION_NAME + "-" + this.cluster,
                 Labels.KUBERNETES_MANAGED_BY_LABEL, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
@@ -201,7 +205,7 @@ public class KafkaConnectBuildTest {
         assertThat(pod.getSpec().getContainers().get(0).getArgs(), is(defaultArgs));
         assertThat(pod.getSpec().getContainers().get(0).getName(), is(KafkaConnectResources.buildPodName(this.cluster)));
         assertThat(pod.getSpec().getContainers().get(0).getImage(), is(build.image));
-        assertThat(pod.getSpec().getContainers().get(0).getPorts().size(), is(0));
+        assertThat(pod.getSpec().getContainers().get(0).getPorts(), is(nullValue()));
         assertThat(pod.getSpec().getContainers().get(0).getResources().getLimits(), is(limit));
         assertThat(pod.getSpec().getContainers().get(0).getResources().getRequests(), is(request));
         assertThat(pod.getSpec().getVolumes().size(), is(2));
@@ -214,8 +218,7 @@ public class KafkaConnectBuildTest {
         assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is("/dockerfile"));
         assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is("docker-credentials"));
         assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is("/kaniko/.docker"));
-        assertThat(pod.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(pod.getMetadata().getOwnerReferences().get(0), is(build.createOwnerReference()));
+        TestUtils.checkOwnerReference(pod, kc);
     }
 
     @ParallelTest
@@ -237,9 +240,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, null);
+        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, "cf065b80ede090aa");
         assertThat(pod.getSpec().getVolumes().size(), is(1));
         assertThat(pod.getSpec().getContainers().get(0).getArgs(), is(defaultArgs));
         assertThat(pod.getSpec().getVolumes().get(0).getName(), is("dockerfile"));
@@ -269,16 +272,15 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild());
+        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild(), SHARED_ENV_PROVIDER);
         ConfigMap cm = build.generateDockerfileConfigMap(dockerfile);
 
         assertThat(cm.getMetadata().getName(), is(KafkaConnectResources.dockerFileConfigMapName(cluster)));
         assertThat(cm.getMetadata().getNamespace(), is(namespace));
         assertThat(cm.getData().get("Dockerfile"), is(dockerfile.getDockerfile()));
-        assertThat(cm.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(cm.getMetadata().getOwnerReferences().get(0), is(build.createOwnerReference()));
+        TestUtils.checkOwnerReference(cm, kc);
     }
 
     @ParallelTest
@@ -310,9 +312,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild());
+        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild(), SHARED_ENV_PROVIDER);
         BuildConfig bc = build.generateBuildConfig(dockerfile);
         assertThat(bc.getMetadata().getName(), is(KafkaConnectResources.buildConfigName(cluster)));
         assertThat(bc.getMetadata().getNamespace(), is(namespace));
@@ -320,7 +322,8 @@ public class KafkaConnectBuildTest {
         Map<String, String> expectedDeploymentLabels = TestUtils.map(Labels.STRIMZI_CLUSTER_LABEL, this.cluster,
                 Labels.STRIMZI_NAME_LABEL, KafkaConnectResources.buildPodName(cluster),
                 Labels.STRIMZI_KIND_LABEL, KafkaConnect.RESOURCE_KIND,
-                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.APPLICATION_NAME,
+                Labels.STRIMZI_COMPONENT_TYPE_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
+                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
                 Labels.KUBERNETES_INSTANCE_LABEL, this.cluster,
                 Labels.KUBERNETES_PART_OF_LABEL, Labels.APPLICATION_NAME + "-" + this.cluster,
                 Labels.KUBERNETES_MANAGED_BY_LABEL, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
@@ -332,8 +335,44 @@ public class KafkaConnectBuildTest {
         assertThat(bc.getSpec().getStrategy().getDockerStrategy(), is(notNullValue()));
         assertThat(bc.getSpec().getResources().getLimits(), is(limit));
         assertThat(bc.getSpec().getResources().getRequests(), is(request));
-        assertThat(bc.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(bc.getMetadata().getOwnerReferences().get(0), is(build.createOwnerReference()));
+        TestUtils.checkOwnerReference(bc, kc);
+    }
+
+    // Test to validate that .spec.image and spec.build.output.image in Kafka Connect are not pointing to the same image
+    @ParallelTest
+    public void testKafkaConnectBuildWithSpecImageSameAsDockerOutput() {
+        Map<String, Quantity> limit = new HashMap<>();
+        limit.put("cpu", new Quantity("500m"));
+        limit.put("memory", new Quantity("512Mi"));
+
+        Map<String, Quantity> request = new HashMap<>();
+        request.put("cpu", new Quantity("1000m"));
+        request.put("memory", new Quantity("1Gi"));
+
+        KafkaConnect kc = new KafkaConnectBuilder()
+                .withNewMetadata()
+                    .withName(cluster)
+                    .withNamespace(namespace)
+                .endMetadata()
+                .withNewSpec()
+                    .withImage("my-image:latest")
+                    .withBootstrapServers("my-kafka:9092")
+                    .withNewBuild()
+                        .withNewDockerOutput()
+                            .withImage("my-image:latest")
+                            .withPushSecret("my-docker-credentials")
+                        .endDockerOutput()
+                        .withPlugins(new PluginBuilder().withName("my-connector").withArtifacts(jarArtifactWithChecksum).build(),
+                            new PluginBuilder().withName("my-connector2").withArtifacts(jarArtifactNoChecksum).build())
+                        .withResources(new ResourceRequirementsBuilder().withLimits(limit).withRequests(request).build())
+                    .endBuild()
+                .endSpec()
+                .build();
+
+        InvalidResourceException thrown = assertThrows(InvalidResourceException.class, () -> {
+            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
+        }, "InvalidResourceException was expected");
+        assertThat(thrown.getMessage(), is("KafkaConnect .spec.image cannot be the same as .spec.build.output.image"));
     }
 
     @ParallelTest
@@ -355,9 +394,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild());
+        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild(), SHARED_ENV_PROVIDER);
         BuildConfig bc = build.generateBuildConfig(dockerfile);
         assertThat(bc.getMetadata().getName(), is(KafkaConnectResources.buildConfigName(cluster)));
         assertThat(bc.getMetadata().getNamespace(), is(namespace));
@@ -365,7 +404,8 @@ public class KafkaConnectBuildTest {
         Map<String, String> expectedDeploymentLabels = TestUtils.map(Labels.STRIMZI_CLUSTER_LABEL, this.cluster,
                 Labels.STRIMZI_NAME_LABEL, KafkaConnectResources.buildPodName(cluster),
                 Labels.STRIMZI_KIND_LABEL, KafkaConnect.RESOURCE_KIND,
-                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.APPLICATION_NAME,
+                Labels.STRIMZI_COMPONENT_TYPE_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
+                Labels.KUBERNETES_NAME_LABEL, KafkaConnectBuild.COMPONENT_TYPE,
                 Labels.KUBERNETES_INSTANCE_LABEL, this.cluster,
                 Labels.KUBERNETES_PART_OF_LABEL, Labels.APPLICATION_NAME + "-" + this.cluster,
                 Labels.KUBERNETES_MANAGED_BY_LABEL, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
@@ -374,8 +414,7 @@ public class KafkaConnectBuildTest {
         assertThat(bc.getSpec().getOutput().getTo().getKind(), is("ImageStreamTag"));
         assertThat(bc.getSpec().getOutput().getTo().getName(), is("my-image:latest"));
         assertThat(bc.getSpec().getStrategy().getDockerStrategy(), is(notNullValue()));
-        assertThat(bc.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(bc.getMetadata().getOwnerReferences().get(0), is(build.createOwnerReference()));
+        TestUtils.checkOwnerReference(bc, kc);
     }
 
     @ParallelTest
@@ -434,9 +473,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, null);
+        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, "cf065b80ede090aa");
         assertThat(pod.getMetadata().getLabels().entrySet().containsAll(buildPodLabels.entrySet()), is(true));
         assertThat(pod.getMetadata().getAnnotations().entrySet().containsAll(buildPodAnnos.entrySet()), is(true));
         assertThat(pod.getSpec().getPriorityClassName(), is("top-priority"));
@@ -444,7 +483,7 @@ public class KafkaConnectBuildTest {
         assertThat(pod.getSpec().getEnableServiceLinks(), is(false));
         assertThat(pod.getSpec().getContainers().get(0).getEnv().stream().filter(env -> "TEST_ENV_VAR".equals(env.getName())).findFirst().orElseThrow().getValue(), is("testValue"));
 
-        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild());
+        KafkaConnectDockerfile dockerfile = new KafkaConnectDockerfile("my-image:latest", kc.getSpec().getBuild(), SHARED_ENV_PROVIDER);
         BuildConfig bc = build.generateBuildConfig(dockerfile);
         assertThat(bc.getMetadata().getLabels().entrySet().containsAll(buildConfigLabels.entrySet()), is(true));
         assertThat(bc.getMetadata().getAnnotations().entrySet().containsAll(buildConfigAnnos.entrySet()), is(true));
@@ -482,9 +521,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS);
+        KafkaConnectBuild build = KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER);
 
-        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, null);
+        Pod pod = build.generateBuilderPod(true, ImagePullPolicy.IFNOTPRESENT, null, "cf065b80ede090aa");
         assertThat(pod.getSpec().getContainers().get(0).getArgs(), is(expectedArgs));
     }
 
@@ -509,7 +548,9 @@ public class KafkaConnectBuildTest {
                 .endSpec()
                 .build();
 
-        InvalidResourceException e = assertThrows(InvalidResourceException.class, () -> KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS));
+        InvalidResourceException e = assertThrows(InvalidResourceException.class, () ->
+            KafkaConnectBuild.fromCrd(new Reconciliation("test", kc.getKind(), kc.getMetadata().getNamespace(), kc.getMetadata().getName()), kc, VERSIONS, SHARED_ENV_PROVIDER)
+        );
 
         assertThat(e.getMessage(), containsString(".spec.build.additionalKanikoOptions contains forbidden options: [--reproducible-something, --build-arg, --digest-file]"));
     }

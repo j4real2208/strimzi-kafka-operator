@@ -19,7 +19,7 @@ import static java.util.Collections.singletonMap;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class RoleOperatorTest extends AbstractResourceOperatorTest<
+public class RoleOperatorTest extends AbstractNamespacedResourceOperatorTest<
         KubernetesClient,
         Role,
         RoleList,
@@ -36,7 +36,7 @@ public class RoleOperatorTest extends AbstractResourceOperatorTest<
     }
 
     @Override
-    protected Role resource() {
+    protected Role resource(String name) {
         PolicyRule rule = new PolicyRuleBuilder()
                 .withApiGroups("somegroup")
                 .addToVerbs("someverb")
@@ -44,7 +44,7 @@ public class RoleOperatorTest extends AbstractResourceOperatorTest<
 
         return new RoleBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo", "bar"))
                 .endMetadata()
@@ -53,13 +53,13 @@ public class RoleOperatorTest extends AbstractResourceOperatorTest<
     }
 
     @Override
-    protected Role modifiedResource() {
+    protected Role modifiedResource(String name) {
         PolicyRule rule = new PolicyRuleBuilder()
                 .withApiGroups("somegroup2")
                 .addToVerbs("someverb2")
                 .build();
 
-        return new RoleBuilder(resource())
+        return new RoleBuilder(resource(name))
                 .withRules(rule)
                 .build();
     }
@@ -72,7 +72,7 @@ public class RoleOperatorTest extends AbstractResourceOperatorTest<
     }
 
     @Override
-    protected AbstractResourceOperator<KubernetesClient, Role, RoleList, Resource<Role>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
+    protected AbstractNamespacedResourceOperator<KubernetesClient, Role, RoleList, Resource<Role>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
         return new RoleOperator(vertx, mockClient);
     }
 }

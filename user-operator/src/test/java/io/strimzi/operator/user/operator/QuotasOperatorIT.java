@@ -5,27 +5,25 @@
 package io.strimzi.operator.user.operator;
 
 import io.strimzi.api.kafka.model.KafkaUserQuotas;
+import io.strimzi.operator.user.ResourceUtils;
 import io.strimzi.operator.user.model.QuotaUtils;
-import io.vertx.junit5.VertxExtension;
-import io.vertx.junit5.VertxTestContext;
 import org.apache.kafka.common.quota.ClientQuotaEntity;
 import org.apache.kafka.common.quota.ClientQuotaFilter;
 import org.apache.kafka.common.quota.ClientQuotaFilterComponent;
-import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 
-@ExtendWith(VertxExtension.class)
-public class QuotasOperatorIT extends AbstractAdminApiOperatorIT<KafkaUserQuotas, Set<String>> {
+public class QuotasOperatorIT extends AdminApiOperatorIT<KafkaUserQuotas, Set<String>> {
     @Override
-    AbstractAdminApiOperator<KafkaUserQuotas, Set<String>> operator() {
-        return new QuotasOperator(vertx, adminClient);
+    AdminApiOperator<KafkaUserQuotas, Set<String>> operator() {
+        return new QuotasOperator(adminClient, ResourceUtils.createUserOperatorConfig(), Executors.newSingleThreadExecutor());
     }
 
     @Override
@@ -73,7 +71,14 @@ public class QuotasOperatorIT extends AbstractAdminApiOperatorIT<KafkaUserQuotas
     }
 
     @Override
-    void assertResources(VertxTestContext context, KafkaUserQuotas expected, KafkaUserQuotas actual) {
+    void assertResources(KafkaUserQuotas expected, KafkaUserQuotas actual) {
         assertThat(QuotaUtils.quotasEquals(expected, actual), is(true));
+    }
+
+    // With quotas, we always patch the credentials regardless whether they exist or not
+    // So we override this and return true
+    @Override
+    public boolean createPatches()    {
+        return true;
     }
 }

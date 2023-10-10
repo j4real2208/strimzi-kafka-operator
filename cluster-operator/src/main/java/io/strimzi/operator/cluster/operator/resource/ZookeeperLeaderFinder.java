@@ -7,7 +7,7 @@ package io.strimzi.operator.cluster.operator.resource;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.certs.CertAndKey;
-import io.strimzi.operator.cluster.model.Ca;
+import io.strimzi.operator.common.model.Ca;
 import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.model.ZookeeperCluster;
 import io.strimzi.operator.common.BackOff;
@@ -42,11 +42,20 @@ public class ZookeeperLeaderFinder {
 
     private static final Pattern LEADER_MODE_PATTERN = Pattern.compile("^Mode: leader$", Pattern.MULTILINE);
 
+    /**
+     * Unknown leader marker
+     */
     public static final String UNKNOWN_LEADER = "-1";
 
     private final Vertx vertx;
     private final Supplier<BackOff> backOffSupplier;
 
+    /**
+     * Constructor
+     *
+     * @param vertx             Vert.x instance
+     * @param backOffSupplier   Backoff supplier
+     */
     public ZookeeperLeaderFinder(Vertx vertx, Supplier<BackOff> backOffSupplier) {
         this.vertx = vertx;
         this.backOffSupplier = backOffSupplier;
@@ -286,7 +295,7 @@ public class ZookeeperLeaderFinder {
      * The hostname for connecting to zookeeper in the given pod.
      *
      * @param reconciliation    Reconciliation used to obtain the namespace and cluster name
-     * @param podName           Name of the pod for which the hosname should be constructed
+     * @param podName           Name of the pod for which the hostname should be constructed
      *
      * @return                  Hostname of the ZooKeeper node
      */

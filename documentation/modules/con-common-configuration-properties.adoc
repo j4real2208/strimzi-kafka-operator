@@ -3,12 +3,14 @@
 // configuring/configuring.adoc
 
 [id='con-common-configuration-properties-{context}']
-== Common configuration properties
+= Common configuration properties
 
-Common configuration properties apply to more than one resource.
+[role="_abstract"]
+Use Common configuration properties to configure Strimzi custom resources.
+You add common configuration properties to a custom resource like any other supported configuration for that resource.
 
 [id='con-common-configuration-replicas-{context}']
-=== `replicas`
+== `replicas`
 
 Use the `replicas` property to configure replicas.
 
@@ -22,7 +24,7 @@ When the node where the component is deployed crashes, Kubernetes will automatic
 However, running Kafka components with multiple replicas can provide faster failover times as the other nodes will be up and running.
 
 [id='con-common-configuration-bootstrap-{context}']
-=== `bootstrapServers`
+== `bootstrapServers`
 
 Use the `bootstrapServers` property to configure a list of bootstrap servers.
 
@@ -35,34 +37,44 @@ If deployed by Strimzi but on different Kubernetes clusters, the list content de
 When using Kafka with a Kafka cluster not managed by Strimzi, you can specify the bootstrap servers list according to the configuration of the given cluster.
 
 [id='con-common-configuration-ssl-{context}']
-=== `ssl`
+== `ssl` (supported TLS versions and cipher suites)
 
-Use the three allowed `ssl` configuration options for client connection using a specific _cipher suite_ for a TLS version.
-A cipher suite combines algorithms for secure connection and data transfer.
+You can incorporate SSL configuration and cipher suite specifications to further secure TLS-based communication between your client application and a Kafka cluster.
+In addition to the standard TLS configuration, you can specify a supported TLS version and enable cipher suites in the configuration for the Kafka broker.
+You can also add the configuration to your clients if you wish to limit the TLS versions and cipher suites they use. 
+The configuration on the client must only use protocols and cipher suites that are enabled on the broker. 
 
-You can also configure the `ssl.endpoint.identification.algorithm` property to enable or disable hostname verification.
+A cipher suite is a set of security mechanisms for secure connection and data transfer.
+For example, the cipher suite `TLS_AES_256_GCM_SHA384` is composed of the following mechanisms, which are used in conjunction with the TLS protocol:
+
+* AES (Advanced Encryption Standard) encryption (256-bit key)
+* GCM (Galois/Counter Mode) authenticated encryption
+* SHA384 (Secure Hash Algorithm) data integrity protection
+
+The combination is encapsulated in the `TLS_AES_256_GCM_SHA384` cipher suite specification.
+
+The `ssl.enabled.protocols` property specifies the available TLS versions that can be used for secure communication between the cluster and its clients. 
+The `ssl.protocol` property sets the default TLS version for all connections, and it must be chosen from the enabled protocols.
+Use the `ssl.endpoint.identification.algorithm` property to enable or disable hostname verification (configurable only in components based on Kafka clients - Kafka Connect, MirrorMaker 1/2, and Kafka Bridge).
 
 .Example SSL configuration
 [source,yaml,subs="attributes+"]
 ----
 # ...
-spec:
-  config:
-    ssl.cipher.suites: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" <1>
-    ssl.enabled.protocols: "TLSv1.2" <2>
-    ssl.protocol: "TLSv1.2" <3>
-    ssl.endpoint.identification.algorithm: HTTPS <4>
+config:
+  ssl.cipher.suites: TLS_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 # <1>
+  ssl.enabled.protocols: TLSv1.3, TLSv1.2 # <2>
+  ssl.protocol: TLSv1.3 # <3>
+  ssl.endpoint.identification.algorithm: HTTPS # <4>
 # ...
 ----
-<1> The cipher suite for TLS using a combination of `ECDHE` key exchange mechanism, `RSA` authentication algorithm,
-`AES` bulk encyption algorithm and `SHA384` MAC algorithm.
-<2> The SSl protocol `TLSv1.2` is enabled.
-<3> Specifies the `TLSv1.2` protocol to generate the SSL context.
-Allowed values are `TLSv1.1` and `TLSv1.2`.
+<1> Cipher suite specifications enabled.
+<2> TLS versions supported.
+<3> Default TLS version is `TLSv1.3`. If a client only supports TLSv1.2, it can still connect to the broker and communicate using that supported version, and vice versa if the configuration is on the client and the broker only supports TLSv1.2.
 <4> Hostname verification is enabled by setting to `HTTPS`. An empty string disables the verification.
 
 [id='con-common-configuration-trusted-certificates-{context}']
-=== `trustedCertificates`
+== `trustedCertificates`
 
 Having set `tls` to configure TLS encryption, use the `trustedCertificates` property to provide a list of secrets with key names under which the certificates are stored in X.509 format.
 
@@ -86,7 +98,7 @@ tls:
 
 If certificates are stored in the same secret, it can be listed multiple times.
 
-If you want to enable TLS, but use the default set of public certification authorities shipped with Java,
+If you want to enable TLS encryption, but use the default set of public certification authorities shipped with Java,
 you can specify `trustedCertificates` as an empty array:
 
 .Example of enabling TLS with the default Java certificates
@@ -96,10 +108,10 @@ tls:
   trustedCertificates: []
 ----
 
-For information on configuring TLS client authentication, see the xref:type-KafkaClientAuthenticationTls-reference[`KafkaClientAuthenticationTls` schema reference].
+For information on configuring mTLS authentication, see the xref:type-KafkaClientAuthenticationTls-reference[`KafkaClientAuthenticationTls` schema reference].
 
 [id='con-common-configuration-resources-{context}']
-=== `resources`
+== `resources`
 
 Configure resource _requests_ and _limits_ to control resources for Strimzi containers.
 You can specify requests and limits for `memory` and `cpu` resources.
@@ -225,7 +237,7 @@ For more information on CPU specification, see {K8sMeaningOfCpu}.
 --
 
 [id='con-common-configuration-images-{context}']
-=== `image`
+== `image`
 
 Use the `image` property to configure the container image used by the component.
 
@@ -243,7 +255,6 @@ You can specify which container image to use for a component using the `image` p
 * `Kafka.spec.entityOperator.topicOperator`
 * `Kafka.spec.entityOperator.userOperator`
 * `Kafka.spec.entityOperator.tlsSidecar`
-* `Kafka.spec.jmxTrans`
 * `KafkaConnect.spec`
 * `KafkaMirrorMaker.spec`
 * `KafkaMirrorMaker2.spec`
@@ -303,9 +314,6 @@ If the `image` name is not defined in the Cluster Operator configuration, then t
 * For Kafka broker initializer:
 . Container image specified in the `STRIMZI_DEFAULT_KAFKA_INIT_IMAGE` environment variable from the Cluster Operator configuration.
 . `{DockerKafkaInit}` container image.
-* For Kafka jmxTrans:
-. Container image specified in the `STRIMZI_DEFAULT_JMXTRANS_IMAGE` environment variable from the Cluster Operator configuration.
-. `{DockerJmxtrans}` container image.
 
 .Example container image configuration
 [source,yaml,subs=attributes+]
@@ -324,7 +332,7 @@ spec:
 ----
 
 [id='con-common-configuration-healthchecks-{context}']
-=== `livenessProbe` and `readinessProbe` healthchecks
+== `livenessProbe` and `readinessProbe` healthchecks
 
 Use the `livenessProbe` and `readinessProbe` properties to configure healthcheck probes supported in Strimzi.
 
@@ -357,7 +365,7 @@ livenessProbe:
 For more information about the `livenessProbe` and `readinessProbe` options, see the xref:type-Probe-reference[Probe schema reference].
 
 [id='con-common-configuration-prometheus-{context}']
-=== `metricsConfig`
+== `metricsConfig`
 
 Use the `metricsConfig` property to enable and configure Prometheus metrics.
 
@@ -414,10 +422,10 @@ When metrics are enabled, they are exposed on port 9404.
 
 When the `metricsConfig` (or deprecated `metrics`) property is not defined in the resource, the Prometheus metrics are disabled.
 
-For more information about setting up and deploying Prometheus and Grafana, see link:{BookURLDeploying}#assembly-metrics-setup-str[Introducing Metrics to Kafka] in the _Deploying and Upgrading Strimzi_ guide.
+For more information about setting up and deploying Prometheus and Grafana, see link:{BookURLDeploying}#assembly-metrics-str[Introducing Metrics to Kafka^].
 
 [id='con-common-configuration-jvm-{context}']
-=== `jvmOptions`
+== `jvmOptions`
 
 The following Strimzi components run inside a Java Virtual Machine (JVM):
 
@@ -434,6 +442,7 @@ To optimize their performance on different platforms and architectures, you conf
 * `Kafka.spec.entityOperator.userOperator`
 * `Kafka.spec.entityOperator.topicOperator`
 * `Kafka.spec.cruiseControl`
+* `KafkaNodePool.spec`
 * `KafkaConnect.spec`
 * `KafkaMirrorMaker.spec`
 * `KafkaMirrorMaker2.spec`
@@ -484,7 +493,7 @@ The following table shows the default heap values.
 |75%
 |None
 
-|MirrorMaker 2.0
+|MirrorMaker 2
 |75%
 |None
 
@@ -569,7 +578,7 @@ jvmOptions:
 For more information about the `jvmOptions`, see the xref:type-JvmOptions-reference[`JvmOptions` schema reference].
 
 [id='con-common-configuration-garbage-collection-{context}']
-=== Garbage collector logging
+== Garbage collector logging
 
 The `jvmOptions` property also allows you to enable and disable garbage collector (GC) logging.
 GC logging is disabled by default.

@@ -85,7 +85,8 @@ spec:
                               - loadbalancer
                               - nodeport
                               - ingress
-                            description: "Type of the listener. Currently the supported types are `internal`, `route`, `loadbalancer`, `nodeport` and `ingress`. \n\n* `internal` type exposes Kafka internally only within the Kubernetes cluster.\n* `route` type uses OpenShift Routes to expose Kafka.\n* `loadbalancer` type uses LoadBalancer type services to expose Kafka.\n* `nodeport` type uses NodePort type services to expose Kafka.\n* `ingress` type uses Kubernetes Nginx Ingress to expose Kafka.\n"
+                              - cluster-ip
+                            description: "Type of the listener. Currently the supported types are `internal`, `route`, `loadbalancer`, `nodeport` and `ingress`. \n\n* `internal` type exposes Kafka internally only within the Kubernetes cluster.\n* `route` type uses OpenShift Routes to expose Kafka.\n* `loadbalancer` type uses LoadBalancer type services to expose Kafka.\n* `nodeport` type uses NodePort type services to expose Kafka.\n* `ingress` type uses Kubernetes Nginx Ingress to expose Kafka with TLS passthrough.\n* `cluster-ip` type uses a per-broker `ClusterIP` service.\n"
                           tls:
                             type: boolean
                             description: Enables TLS encryption on the listener. This is a required property.
@@ -138,12 +139,18 @@ spec:
                               enableECDSA:
                                 type: boolean
                                 description: Enable or disable ECDSA support by installing BouncyCastle crypto provider. ECDSA support is always enabled. The BouncyCastle libraries are no longer packaged with Strimzi. Value is ignored.
+                              enableMetrics:
+                                type: boolean
+                                description: Enable or disable OAuth metrics. Default value is `false`.
                               enableOauthBearer:
                                 type: boolean
                                 description: Enable or disable OAuth authentication over SASL_OAUTHBEARER. Default value is `true`.
                               enablePlain:
                                 type: boolean
                                 description: Enable or disable OAuth authentication over SASL_PLAIN. There is no re-authentication support when this mechanism is used. Default value is `false`.
+                              failFast:
+                                type: boolean
+                                description: Enable or disable termination of Kafka broker processes due to potentially recoverable runtime errors during startup. Default value is `true`.
                               fallbackUserNameClaim:
                                 type: string
                                 description: The fallback username claim to be used for the user id if the claim specified by `userNameClaim` is not present. This is useful when `client_credentials` authentication only results in the client id being provided in another claim. It only takes effect if `userNameClaim` is set.
@@ -156,6 +163,12 @@ spec:
                               groupsClaimDelimiter:
                                 type: string
                                 description: "A delimiter used to parse groups when they are extracted as a single String value rather than a JSON array. Default value is ',' (comma)."
+                              httpRetries:
+                                type: integer
+                                description: "The maximum number of retries to attempt if an initial HTTP request fails. If not set, the default is to not attempt any retries."
+                              httpRetryPauseMs:
+                                type: integer
+                                description: "The pause to take before retrying a failed HTTP request. If not set, the default is to not pause at all but to immediately repeat a request."
                               introspectionEndpointUri:
                                 type: string
                                 description: URI of the token introspection endpoint which can be used to validate opaque non-JWT tokens.
@@ -166,6 +179,9 @@ spec:
                                 type: integer
                                 minimum: 1
                                 description: Configures how often are the JWKS certificates considered valid. The expiry interval has to be at least 60 seconds longer then the refresh interval specified in `jwksRefreshSeconds`. Defaults to 360 seconds.
+                              jwksIgnoreKeyUse:
+                                type: boolean
+                                description: Flag to ignore the 'use' attribute of `key` declarations in a JWKS endpoint response. Default value is `false`.
                               jwksMinRefreshPauseSeconds:
                                 type: integer
                                 minimum: 0
@@ -310,10 +326,10 @@ spec:
                                       description: ID of the kafka broker (broker identifier). Broker IDs start from 0 and correspond to the number of broker replicas.
                                     advertisedHost:
                                       type: string
-                                      description: The host name which will be used in the brokers' `advertised.brokers`.
+                                      description: The host name used in the brokers' `advertised.listeners`.
                                     advertisedPort:
                                       type: integer
-                                      description: The port number which will be used in the brokers' `advertised.brokers`.
+                                      description: The port number used in the brokers' `advertised.listeners`.
                                     host:
                                       type: string
                                       description: The broker host. This field will be used in the Ingress resource or in the Route resource to specify the desired hostname. This field can be used only with `route` (optional) or `ingress` (required) type listeners.
@@ -340,7 +356,7 @@ spec:
                                   - SingleStack
                                   - PreferDualStack
                                   - RequireDualStack
-                                description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                                description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                               ipFamilies:
                                 type: array
                                 items:
@@ -348,13 +364,13 @@ spec:
                                   enum:
                                     - IPv4
                                     - IPv6
-                                description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                                description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                               createBootstrapService:
                                 type: boolean
                                 description: Whether to create the bootstrap service or not. The bootstrap service is created by default (if not specified differently). This field can be used with the `loadBalancer` type listener.
                               class:
                                 type: string
-                                description: "Configures the `Ingress` class that defines which `Ingress` controller will be used. This field can be used only with `ingress` type listener. If not specified, the default Ingress controller will be used."
+                                description: "Configures a specific class for `Ingress` and `LoadBalancer` that defines which controller will be used. This field can only be used with `ingress` and `loadbalancer` type listeners. If not specified, the default controller is used. For an `ingress` listener, set the `ingressClassName` property in the `Ingress` resources. For a `loadbalancer` listener, set the `loadBalancerClass` property  in the `Service` resources."
                               finalizers:
                                 type: array
                                 items:
@@ -386,7 +402,7 @@ spec:
                                   This field is used to select the preferred address type, which is checked first. If no address is found for this address type, the other types are checked in the default order. This field can only be used with `nodeport` type listener.
                               useServiceDnsDomain:
                                 type: boolean
-                                description: "Configures whether the Kubernetes service DNS domain should be used or not. If set to `true`, the generated addresses will contain the service DNS domain suffix (by default `.cluster.local`, can be configured using environment variable `KUBERNETES_SERVICE_DNS_DOMAIN`). Defaults to `false`.This field can be used only with `internal` type listener."
+                                description: "Configures whether the Kubernetes service DNS domain should be used or not. If set to `true`, the generated addresses will contain the service DNS domain suffix (by default `.cluster.local`, can be configured using environment variable `KUBERNETES_SERVICE_DNS_DOMAIN`). Defaults to `false`.This field can be used only with `internal` and `cluster-ip` type listeners."
                             description: Additional listener configuration.
                           networkPolicyPeers:
                             type: array
@@ -450,7 +466,7 @@ spec:
                     config:
                       x-kubernetes-preserve-unknown-fields: true
                       type: object
-                      description: "Kafka broker config properties with the following prefixes cannot be set: listeners, advertised., broker., listener., host.name, port, inter.broker.listener.name, sasl., ssl., security., password., log.dir, zookeeper.connect, zookeeper.set.acl, zookeeper.ssl, zookeeper.clientCnxnSocket, authorizer., super.user, cruise.control.metrics.topic, cruise.control.metrics.reporter.bootstrap.servers,node.id, process.roles, controller. (with the exception of: zookeeper.connection.timeout.ms, ssl.cipher.suites, ssl.protocol, ssl.enabled.protocols,cruise.control.metrics.topic.num.partitions, cruise.control.metrics.topic.replication.factor, cruise.control.metrics.topic.retention.ms,cruise.control.metrics.topic.auto.create.retries, cruise.control.metrics.topic.auto.create.timeout.ms,cruise.control.metrics.topic.min.insync.replicas,controller.quorum.election.backoff.max.ms, controller.quorum.election.timeout.ms, controller.quorum.fetch.timeout.ms)."
+                      description: "Kafka broker config properties with the following prefixes cannot be set: listeners, advertised., broker., listener., host.name, port, inter.broker.listener.name, sasl., ssl., security., password., log.dir, zookeeper.connect, zookeeper.set.acl, zookeeper.ssl, zookeeper.clientCnxnSocket, authorizer., super.user, cruise.control.metrics.topic, cruise.control.metrics.reporter.bootstrap.servers,node.id, process.roles, controller., metadata.log.dir (with the exception of: zookeeper.connection.timeout.ms, sasl.server.max.receive.size,ssl.cipher.suites, ssl.protocol, ssl.enabled.protocols, ssl.secure.random.implementation,cruise.control.metrics.topic.num.partitions, cruise.control.metrics.topic.replication.factor, cruise.control.metrics.topic.retention.ms,cruise.control.metrics.topic.auto.create.retries, cruise.control.metrics.topic.auto.create.timeout.ms,cruise.control.metrics.topic.min.insync.replicas,controller.quorum.election.backoff.max.ms, controller.quorum.election.timeout.ms, controller.quorum.fetch.timeout.ms)."
                     storage:
                       type: object
                       properties:
@@ -568,10 +584,21 @@ spec:
                           description: Enable or disable TLS hostname verification. Default value is `false`.
                         enableMetrics:
                           type: boolean
-                          description: Defines whether the Open Policy Agent authorizer plugin should provide metrics. Defaults to `false`.
+                          description: Enable or disable OAuth metrics. The default value is `false`.
                         expireAfterMs:
                           type: integer
                           description: The expiration of the records kept in the local cache to avoid querying the Open Policy Agent for every request. Defines how often the cached authorization decisions are reloaded from the Open Policy Agent server. In milliseconds. Defaults to `3600000`.
+                        grantsAlwaysLatest:
+                          type: boolean
+                          description: "Controls whether the latest grants are fetched for a new session. When enabled, grants are retrieved from Keycloak and cached for the user. The default value is `false`."
+                        grantsGcPeriodSeconds:
+                          type: integer
+                          minimum: 1
+                          description: "The time, in seconds, between consecutive runs of a job that cleans stale grants from the cache. The default value is 300."
+                        grantsMaxIdleTimeSeconds:
+                          type: integer
+                          minimum: 1
+                          description: "The time, in seconds, after which an idle grant can be evicted from the cache. The default value is 300."
                         grantsRefreshPeriodSeconds:
                           type: integer
                           minimum: 0
@@ -580,6 +607,10 @@ spec:
                           type: integer
                           minimum: 1
                           description: "The number of threads to use to refresh grants for active sessions. The more threads, the more parallelism, so the sooner the job completes. However, using more threads places a heavier load on the authorization server. The default value is 5."
+                        httpRetries:
+                          type: integer
+                          minimum: 0
+                          description: "The maximum number of retries to attempt if an initial HTTP request fails. If not set, the default is to not attempt any retries."
                         initialCacheCapacity:
                           type: integer
                           description: Initial capacity of the local cache used by the authorizer to avoid querying the Open Policy Agent for every request Defaults to `5000`.
@@ -623,7 +654,7 @@ spec:
                             - opa
                             - keycloak
                             - custom
-                          description: "Authorization type. Currently, the supported types are `simple`, `keycloak`, `opa` and `custom`. `simple` authorization type uses Kafka's `kafka.security.authorizer.AclAuthorizer` class for authorization. `keycloak` authorization type uses Keycloak Authorization Services for authorization. `opa` authorization type uses Open Policy Agent based authorization.`custom` authorization type uses user-provided implementation for authorization."
+                          description: "Authorization type. Currently, the supported types are `simple`, `keycloak`, `opa` and `custom`. `simple` authorization type uses Kafka's built-in authorizer for authorization. `keycloak` authorization type uses Keycloak Authorization Services for authorization. `opa` authorization type uses Open Policy Agent based authorization.`custom` authorization type uses user-provided implementation for authorization."
                         url:
                           type: string
                           example: http://opa:8181/v1/data/kafka/authz/allow
@@ -637,7 +668,7 @@ spec:
                         topologyKey:
                           type: string
                           example: topology.kubernetes.io/zone
-                          description: "A key that matches labels assigned to the Kubernetes cluster nodes. The value of the label is used to set a broker's `broker.rack` config, and the `client.rack` config for Kafka Connect or MirrorMaker 2.0."
+                          description: "A key that matches labels assigned to the Kubernetes cluster nodes. The value of the label is used to set a broker's `broker.rack` config, and the `client.rack` config for Kafka Connect or MirrorMaker 2."
                       required:
                         - topologyKey
                       description: Configuration of the `broker.rack` broker config.
@@ -741,6 +772,13 @@ spec:
                     resources:
                       type: object
                       properties:
+                        claims:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
                         limits:
                           x-kubernetes-preserve-unknown-fields: true
                           type: object
@@ -816,11 +854,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             podManagementPolicy:
                               type: string
@@ -838,11 +876,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -1266,10 +1304,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -1285,11 +1331,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             ipFamilyPolicy:
                               type: string
@@ -1297,7 +1343,7 @@ spec:
                                 - SingleStack
                                 - PreferDualStack
                                 - RequireDualStack
-                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                             ipFamilies:
                               type: array
                               items:
@@ -1305,7 +1351,7 @@ spec:
                                 enum:
                                   - IPv4
                                   - IPv6
-                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                           description: Template for Kafka bootstrap `Service`.
                         brokersService:
                           type: object
@@ -1316,11 +1362,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             ipFamilyPolicy:
                               type: string
@@ -1328,7 +1374,7 @@ spec:
                                 - SingleStack
                                 - PreferDualStack
                                 - RequireDualStack
-                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                             ipFamilies:
                               type: array
                               items:
@@ -1336,7 +1382,7 @@ spec:
                                 enum:
                                   - IPv4
                                   - IPv6
-                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                           description: Template for Kafka broker `Service`.
                         externalBootstrapService:
                           type: object
@@ -1347,11 +1393,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka external bootstrap `Service`.
                         perPodService:
@@ -1363,11 +1409,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka per-pod `Services` used for access from outside of Kubernetes.
                         externalBootstrapRoute:
@@ -1379,11 +1425,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka external bootstrap `Route`.
                         perPodRoute:
@@ -1395,11 +1441,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka per-pod `Routes` used for access from outside of OpenShift.
                         externalBootstrapIngress:
@@ -1411,11 +1457,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka external bootstrap `Ingress`.
                         perPodIngress:
@@ -1427,11 +1473,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka per-pod `Ingress` used for access from outside of Kubernetes.
                         persistentVolumeClaim:
@@ -1443,11 +1489,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for all Kafka `PersistentVolumeClaims`.
                         podDisruptionBudget:
@@ -1459,11 +1505,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata to apply to the `PodDisruptionBudgetTemplate` resource.
                             maxUnavailable:
                               type: integer
@@ -1627,11 +1673,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Secret with Kafka Cluster certificate public key.
                         serviceAccount:
@@ -1643,11 +1689,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the Kafka service account.
                         jmxSecret:
@@ -1659,11 +1705,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Secret of the Kafka Cluster JMX authentication.
                         clusterRoleBinding:
@@ -1675,11 +1721,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the Kafka ClusterRoleBinding.
                         podSet:
@@ -1691,14 +1737,14 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka `StrimziPodSet` resource.
-                      description: "Template for Kafka cluster resources. The template allows users to specify how the `StatefulSet`, `Pods`, and `Services` are generated."
+                      description: Template for Kafka cluster resources. The template allows users to specify how the Kubernetes resources are generated.
                   required:
                     - replicas
                     - listeners
@@ -1860,6 +1906,13 @@ spec:
                     resources:
                       type: object
                       properties:
+                        claims:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
                         limits:
                           x-kubernetes-preserve-unknown-fields: true
                           type: object
@@ -1935,11 +1988,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             podManagementPolicy:
                               type: string
@@ -1957,11 +2010,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -2385,10 +2438,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -2404,11 +2465,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             ipFamilyPolicy:
                               type: string
@@ -2416,7 +2477,7 @@ spec:
                                 - SingleStack
                                 - PreferDualStack
                                 - RequireDualStack
-                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                             ipFamilies:
                               type: array
                               items:
@@ -2424,7 +2485,7 @@ spec:
                                 enum:
                                   - IPv4
                                   - IPv6
-                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                           description: Template for ZooKeeper client `Service`.
                         nodesService:
                           type: object
@@ -2435,11 +2496,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             ipFamilyPolicy:
                               type: string
@@ -2447,7 +2508,7 @@ spec:
                                 - SingleStack
                                 - PreferDualStack
                                 - RequireDualStack
-                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                             ipFamilies:
                               type: array
                               items:
@@ -2455,7 +2516,7 @@ spec:
                                 enum:
                                   - IPv4
                                   - IPv6
-                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                           description: Template for ZooKeeper nodes `Service`.
                         persistentVolumeClaim:
                           type: object
@@ -2466,11 +2527,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for all ZooKeeper `PersistentVolumeClaims`.
                         podDisruptionBudget:
@@ -2482,11 +2543,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata to apply to the `PodDisruptionBudgetTemplate` resource.
                             maxUnavailable:
                               type: integer
@@ -2576,11 +2637,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the ZooKeeper service account.
                         jmxSecret:
@@ -2592,11 +2653,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Secret of the Zookeeper Cluster JMX authentication.
                         podSet:
@@ -2608,14 +2669,14 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for ZooKeeper `StrimziPodSet` resource.
-                      description: "Template for ZooKeeper cluster resources. The template allows users to specify how the `StatefulSet`, `Pods`, and `Services` are generated."
+                      description: Template for ZooKeeper cluster resources. The template allows users to specify how the Kubernetes resources are generated.
                   required:
                     - replicas
                     - storage
@@ -2715,6 +2776,13 @@ spec:
                         resources:
                           type: object
                           properties:
+                            claims:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  name:
+                                    type: string
                             limits:
                               x-kubernetes-preserve-unknown-fields: true
                               type: object
@@ -2859,6 +2927,13 @@ spec:
                         resources:
                           type: object
                           properties:
+                            claims:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  name:
+                                    type: string
                             limits:
                               x-kubernetes-preserve-unknown-fields: true
                               type: object
@@ -2997,6 +3072,13 @@ spec:
                         resources:
                           type: object
                           properties:
+                            claims:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  name:
+                                    type: string
                             limits:
                               x-kubernetes-preserve-unknown-fields: true
                               type: object
@@ -3017,12 +3099,18 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
+                            deploymentStrategy:
+                              type: string
+                              enum:
+                                - RollingUpdate
+                                - Recreate
+                              description: Pod replacement strategy for deployment configuration changes. Valid values are `RollingUpdate` and `Recreate`. Defaults to `RollingUpdate`.
                           description: Template for Entity Operator `Deployment`.
                         pod:
                           type: object
@@ -3033,11 +3121,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -3461,10 +3549,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -3702,13 +3798,61 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the Entity Operator service account.
+                        entityOperatorRole:
+                          type: object
+                          properties:
+                            metadata:
+                              type: object
+                              properties:
+                                labels:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Labels added to the Kubernetes resource.
+                                annotations:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Annotations added to the Kubernetes resource.
+                              description: Metadata applied to the resource.
+                          description: Template for the Entity Operator Role.
+                        topicOperatorRoleBinding:
+                          type: object
+                          properties:
+                            metadata:
+                              type: object
+                              properties:
+                                labels:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Labels added to the Kubernetes resource.
+                                annotations:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Annotations added to the Kubernetes resource.
+                              description: Metadata applied to the resource.
+                          description: Template for the Entity Topic Operator RoleBinding.
+                        userOperatorRoleBinding:
+                          type: object
+                          properties:
+                            metadata:
+                              type: object
+                              properties:
+                                labels:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Labels added to the Kubernetes resource.
+                                annotations:
+                                  x-kubernetes-preserve-unknown-fields: true
+                                  type: object
+                                  description: Annotations added to the Kubernetes resource.
+                              description: Metadata applied to the resource.
+                          description: Template for the Entity Topic Operator RoleBinding.
                       description: Template for Entity Operator resources. The template allows users to specify how a `Deployment` and `Pod` is generated.
                   description: Configuration of the Entity Operator.
                 clusterCa:
@@ -3834,6 +3978,13 @@ spec:
                         resources:
                           type: object
                           properties:
+                            claims:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  name:
+                                    type: string
                             limits:
                               x-kubernetes-preserve-unknown-fields: true
                               type: object
@@ -3845,6 +3996,13 @@ spec:
                     resources:
                       type: object
                       properties:
+                        claims:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
                         limits:
                           x-kubernetes-preserve-unknown-fields: true
                           type: object
@@ -3973,12 +4131,18 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
+                            deploymentStrategy:
+                              type: string
+                              enum:
+                                - RollingUpdate
+                                - Recreate
+                              description: Pod replacement strategy for deployment configuration changes. Valid values are `RollingUpdate` and `Recreate`. Defaults to `RollingUpdate`.
                           description: Template for Cruise Control `Deployment`.
                         pod:
                           type: object
@@ -3989,11 +4153,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -4417,10 +4581,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -4436,11 +4608,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             ipFamilyPolicy:
                               type: string
@@ -4448,7 +4620,7 @@ spec:
                                 - SingleStack
                                 - PreferDualStack
                                 - RequireDualStack
-                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Family Policy used by the service. Available options are `SingleStack`, `PreferDualStack` and `RequireDualStack`. `SingleStack` is for a single IP family. `PreferDualStack` is for two IP families on dual-stack configured clusters or a single IP family on single-stack clusters. `RequireDualStack` fails unless there are two IP families on dual-stack configured clusters. If unspecified, Kubernetes will choose the default value based on the service type."
                             ipFamilies:
                               type: array
                               items:
@@ -4456,7 +4628,7 @@ spec:
                                 enum:
                                   - IPv4
                                   - IPv6
-                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting. Available on Kubernetes 1.20 and newer."
+                              description: "Specifies the IP Families used by the service. Available options are `IPv4` and `IPv6`. If unspecified, Kubernetes will choose the default value based on the `ipFamilyPolicy` setting."
                           description: Template for Cruise Control API `Service`.
                         podDisruptionBudget:
                           type: object
@@ -4467,11 +4639,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata to apply to the `PodDisruptionBudgetTemplate` resource.
                             maxUnavailable:
                               type: integer
@@ -4635,11 +4807,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the Cruise Control service account.
                       description: "Template to specify how Cruise Control resources, `Deployments` and `Pods`, are generated."
@@ -4788,6 +4960,13 @@ spec:
                     resources:
                       type: object
                       properties:
+                        claims:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
                         limits:
                           x-kubernetes-preserve-unknown-fields: true
                           type: object
@@ -4807,12 +4986,18 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
+                            deploymentStrategy:
+                              type: string
+                              enum:
+                                - RollingUpdate
+                                - Recreate
+                              description: Pod replacement strategy for deployment configuration changes. Valid values are `RollingUpdate` and `Recreate`. Defaults to `RollingUpdate`.
                           description: Template for JmxTrans `Deployment`.
                         pod:
                           type: object
@@ -4823,11 +5008,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -5251,10 +5436,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -5344,18 +5537,18 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
-                          description: Template for the JMX Trans service account.
+                          description: Template for the JmxTrans service account.
                       description: Template for JmxTrans resources.
                   required:
                     - outputDefinitions
                     - kafkaQueries
-                  description: "Configuration for JmxTrans. When the property is present a JmxTrans deployment is created for gathering JMX metrics from each Kafka broker. For more information see https://github.com/jmxtrans/jmxtrans[JmxTrans GitHub]."
+                  description: "As of Strimzi 0.35.0, JMXTrans is not supported anymore and this option is ignored."
                 kafkaExporter:
                   type: object
                   properties:
@@ -5368,9 +5561,22 @@ spec:
                     topicRegex:
                       type: string
                       description: Regular expression to specify which topics to collect. Default value is `.*`.
+                    groupExcludeRegex:
+                      type: string
+                      description: Regular expression to specify which consumer groups to exclude.
+                    topicExcludeRegex:
+                      type: string
+                      description: Regular expression to specify which topics to exclude.
                     resources:
                       type: object
                       properties:
+                        claims:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
                         limits:
                           x-kubernetes-preserve-unknown-fields: true
                           type: object
@@ -5396,12 +5602,18 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
+                            deploymentStrategy:
+                              type: string
+                              enum:
+                                - RollingUpdate
+                                - Recreate
+                              description: Pod replacement strategy for deployment configuration changes. Valid values are `RollingUpdate` and `Recreate`. Defaults to `RollingUpdate`.
                           description: Template for Kafka Exporter `Deployment`.
                         pod:
                           type: object
@@ -5412,11 +5624,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                             imagePullSecrets:
                               type: array
@@ -5840,10 +6052,18 @@ spec:
                                       matchLabels:
                                         x-kubernetes-preserve-unknown-fields: true
                                         type: object
+                                  matchLabelKeys:
+                                    type: array
+                                    items:
+                                      type: string
                                   maxSkew:
                                     type: integer
                                   minDomains:
                                     type: integer
+                                  nodeAffinityPolicy:
+                                    type: string
+                                  nodeTaintsPolicy:
+                                    type: string
                                   topologyKey:
                                     type: string
                                   whenUnsatisfiable:
@@ -5859,11 +6079,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for Kafka Exporter `Service`.
                         container:
@@ -5949,11 +6169,11 @@ spec:
                                 labels:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Labels added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Labels added to the Kubernetes resource.
                                 annotations:
                                   x-kubernetes-preserve-unknown-fields: true
                                   type: object
-                                  description: "Annotations added to the resource template. Can be applied to different resources such as `StatefulSets`, `Deployments`, `Pods`, and `Services`."
+                                  description: Annotations added to the Kubernetes resource.
                               description: Metadata applied to the resource.
                           description: Template for the Kafka Exporter service account.
                       description: Customization of deployment templates and pods.
@@ -6049,7 +6269,7 @@ spec:
                     properties:
                       type:
                         type: string
-                        description: "*The `type` property has been deprecated, and should now be configured using `name`.* The name of the listener."
+                        description: The name of the listener.
                       name:
                         type: string
                         description: The name of the listener.
@@ -6074,7 +6294,22 @@ spec:
                           type: string
                         description: A list of TLS certificates which can be used to verify the identity of the server when connecting to the given listener. Set only for `tls` and `external` listeners.
                   description: Addresses of the internal and external listeners.
+                kafkaNodePools:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: The name of the KafkaNodePool used by this Kafka resource.
+                  description: List of the KafkaNodePools used by this Kafka cluster.
                 clusterId:
                   type: string
                   description: Kafka cluster Id.
+                operatorLastSuccessfulVersion:
+                  type: string
+                  description: The version of the Strimzi Cluster Operator which performed the last successful reconciliation.
+                kafkaVersion:
+                  type: string
+                  description: The version of Kafka currently deployed in the cluster.
               description: "The status of the Kafka and ZooKeeper clusters, and Topic Operator."

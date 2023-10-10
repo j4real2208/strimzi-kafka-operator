@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.when;
 
-public class BuildConfigOperatorTest extends AbstractResourceOperatorTest<OpenShiftClient, BuildConfig,
+public class BuildConfigOperatorTest extends AbstractNamespacedResourceOperatorTest<OpenShiftClient, BuildConfig,
         BuildConfigList, BuildConfigResource<BuildConfig, Void, Build>> {
 
     @Override
@@ -43,11 +43,11 @@ public class BuildConfigOperatorTest extends AbstractResourceOperatorTest<OpenSh
     }
 
     @Override
-    protected BuildConfig resource() {
+    protected BuildConfig resource(String name) {
         return new BuildConfigBuilder()
             .withNewMetadata()
                 .withNamespace(NAMESPACE)
-                .withName(RESOURCE_NAME)
+                .withName(name)
             .endMetadata()
             .withNewSpec()
                 .withTriggers(new BuildTriggerPolicy())
@@ -55,8 +55,8 @@ public class BuildConfigOperatorTest extends AbstractResourceOperatorTest<OpenSh
     }
 
     @Override
-    protected BuildConfig modifiedResource() {
-        return new BuildConfigBuilder(resource())
+    protected BuildConfig modifiedResource(String name) {
+        return new BuildConfigBuilder(resource(name))
                 .editSpec()
                     .withServiceAccount("service-account")
                 .endSpec()

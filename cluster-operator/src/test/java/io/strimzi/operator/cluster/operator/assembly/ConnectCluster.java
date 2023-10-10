@@ -4,12 +4,11 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
+import io.strimzi.test.TestUtils;
 import org.apache.kafka.connect.cli.ConnectDistributed;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.runtime.Connect;
 
-import java.io.IOException;
-import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -21,6 +20,7 @@ public class ConnectCluster {
     private int numNodes;
     private String brokerList;
     private final List<Connect> connectInstances = new ArrayList<>();
+    private final List<Integer> connectPorts = new ArrayList<>();
     private final List<String> pluginPath = new ArrayList<>();
 
     ConnectCluster addConnectNodes(int numNodes) {
@@ -35,8 +35,10 @@ public class ConnectCluster {
 
     public void startup() throws InterruptedException {
         for (int i = 0; i < numNodes; i++) {
+            int port = TestUtils.getFreePort();
+
             Map<String, String> workerProps = new HashMap<>();
-            workerProps.put("listeners", "http://localhost:" + getFreePort());
+            workerProps.put("listeners", "http://localhost:" + port);
             workerProps.put("plugin.path", String.join(",", pluginPath));
             workerProps.put("group.id", toString());
             workerProps.put("key.converter", "org.apache.kafka.connect.json.JsonConverter");
@@ -59,6 +61,7 @@ public class ConnectCluster {
                     ConnectDistributed connectDistributed = new ConnectDistributed();
                     Connect connect = connectDistributed.startConnect(workerProps);
                     connectInstances.add(connect);
+                    connectPorts.add(port);
                     l.countDown();
                     connect.awaitStop();
                 } catch (ConnectException e)    {
@@ -95,19 +98,6 @@ public class ConnectCluster {
      * @return      Port which is used by given Connect node
      */
     public int getPort(int node) {
-        return connectInstances.get(node).adminUrl().getPort();
-    }
-
-    /**
-     * Finds a free server port which can be used by the Connect REST API
-     *
-     * @return  A free TCP port
-     */
-    private int getFreePort()   {
-        try (ServerSocket serverSocket = new ServerSocket(0)) {
-            return serverSocket.getLocalPort();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to find free port", e);
-        }
+        return connectPorts.get(node);
     }
 }

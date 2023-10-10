@@ -5,7 +5,6 @@
 package io.strimzi.operator.topic;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.strimzi.api.kafka.Crds;
 import io.strimzi.operator.common.OperatorKubernetesClientBuilder;
 import io.strimzi.operator.common.ShutdownHook;
 import io.vertx.core.Vertx;
@@ -27,12 +26,22 @@ public class Main {
 
     private final static Logger LOGGER = LogManager.getLogger(Main.class);
 
+
+
+    /**
+     * The main method used to run the Cluster Operator
+     *
+     * @param args  The command line arguments
+     */
     public static void main(String[] args) {
         LOGGER.info("TopicOperator {} is starting", Main.class.getPackage().getImplementationVersion());
         Main main = new Main();
         main.run();
     }
 
+    /**
+     * Runs the Topic Operator
+     */
     public void run() {
         Map<String, String> m = new HashMap<>(System.getenv());
         m.keySet().retainAll(Config.keyNames());
@@ -43,14 +52,17 @@ public class Main {
     private void deploy(Config config) {
         final String strimziVersion = Main.class.getPackage().getImplementationVersion();
         KubernetesClient kubeClient = new OperatorKubernetesClientBuilder("strimzi-topic-operator", strimziVersion).build();
-        Crds.registerCustomKinds();
+
+        ShutdownHook shutdownHook = new ShutdownHook();
+        Runtime.getRuntime().addShutdownHook(new Thread(shutdownHook));
+
         VertxOptions options = new VertxOptions().setMetricsOptions(
                 new MicrometerMetricsOptions()
                         .setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true))
                         .setJvmMetricsEnabled(true)
                         .setEnabled(true));
         Vertx vertx = Vertx.vertx(options);
-        Runtime.getRuntime().addShutdownHook(new Thread(new ShutdownHook(vertx)));
+        shutdownHook.register(() -> ShutdownHook.shutdownVertx(vertx, 10_000L));
 
         Session session = new Session(kubeClient, config);
         vertx.deployVerticle(session, ar -> {

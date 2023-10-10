@@ -52,9 +52,9 @@ public class KafkaResources {
     ////////
 
     /**
-     * Returns the name of the Kafka {@code StatefulSet} for a {@code Kafka} cluster of the given name.
+     * Returns the name of the Kafka {@code StrimziPodSet} for a {@code Kafka} cluster of the given name.
      * @param clusterName  The {@code metadata.name} of the {@code Kafka} resource.
-     * @return The name of the corresponding Kafka {@code StatefulSet}.
+     * @return The name of the corresponding Kafka {@code StrimziPodSet}.
      */
     public static String kafkaStatefulSetName(String clusterName) {
         return clusterName + "-kafka";
@@ -192,9 +192,9 @@ public class KafkaResources {
     ////////
 
     /**
-     * Returns the name of the ZooKeeper {@code StatefulSet} for a {@code Kafka} cluster of the given name.
+     * Returns the name of the ZooKeeper {@code StrimziPodSet} for a {@code Kafka} cluster of the given name.
      * @param clusterName  The {@code metadata.name} of the {@code Kafka} resource.
-     * @return The name of the corresponding ZooKeeper {@code StatefulSet}.
+     * @return The name of the corresponding ZooKeeper {@code StrimziPodSet}.
      */
     public static String zookeeperStatefulSetName(String clusterName) {
         return clusterName + "-zookeeper";
@@ -374,5 +374,16 @@ public class KafkaResources {
      */
     public static String entityUserOperatorRoleBinding(String clusterName) {
         return clusterName + "-entity-user-operator-role";
+    }
+
+    /**
+     * Name of the secret with the Cluster Operator certificates for connecting to this cluster
+     *
+     * @param cluster   Name of the Kafka cluster
+     *
+     * @return  Name of the Cluster Operator certificate secret
+     */
+    public static String secretName(String cluster) {
+        return cluster + "-cluster-operator-certs";
     }
 }

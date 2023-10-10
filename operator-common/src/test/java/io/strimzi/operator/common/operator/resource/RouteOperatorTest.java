@@ -14,7 +14,7 @@ import io.vertx.core.Vertx;
 
 import static org.mockito.Mockito.when;
 
-public class RouteOperatorTest extends AbstractResourceOperatorTest<OpenShiftClient, Route, RouteList, Resource<Route>> {
+public class RouteOperatorTest extends AbstractNamespacedResourceOperatorTest<OpenShiftClient, Route, RouteList, Resource<Route>> {
     @Override
     protected Class<OpenShiftClient> clientType() {
         return OpenShiftClient.class;
@@ -26,21 +26,21 @@ public class RouteOperatorTest extends AbstractResourceOperatorTest<OpenShiftCli
     }
 
     @Override
-    protected Route resource() {
+    protected Route resource(String name) {
         return new RouteBuilder()
                 .withNewMetadata()
                     .withNamespace(NAMESPACE)
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                 .endMetadata()
                 .build();
     }
 
     @Override
-    protected Route modifiedResource() {
+    protected Route modifiedResource(String name) {
         return new RouteBuilder()
                 .withNewMetadata()
                     .withNamespace(NAMESPACE)
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .addToLabels("foo", "bar")
                 .endMetadata()
                 .build();
@@ -52,7 +52,7 @@ public class RouteOperatorTest extends AbstractResourceOperatorTest<OpenShiftCli
     }
 
     @Override
-    protected AbstractResourceOperator<OpenShiftClient, Route, RouteList, Resource<Route>> createResourceOperations(Vertx vertx, OpenShiftClient mockClient) {
+    protected AbstractNamespacedResourceOperator<OpenShiftClient, Route, RouteList, Resource<Route>> createResourceOperations(Vertx vertx, OpenShiftClient mockClient) {
         return new RouteOperator(vertx, mockClient);
     }
 }

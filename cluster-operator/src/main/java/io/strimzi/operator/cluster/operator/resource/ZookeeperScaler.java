@@ -5,12 +5,13 @@
 package io.strimzi.operator.cluster.operator.resource;
 
 import io.fabric8.kubernetes.api.model.Secret;
-import io.strimzi.operator.cluster.model.Ca;
+import io.strimzi.operator.common.model.Ca;
 import io.strimzi.operator.cluster.model.ZookeeperCluster;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
+import io.strimzi.operator.common.VertxUtil;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
@@ -47,10 +48,10 @@ public class ZookeeperScaler implements AutoCloseable {
     private final Secret coKeySecret;
 
     private final String trustStorePassword;
-    private File trustStoreFile;
+    private final File trustStoreFile;
 
     private final String keyStorePassword;
-    private File keyStoreFile;
+    private final File keyStoreFile;
 
     private final Reconciliation reconciliation;
 
@@ -159,7 +160,7 @@ public class ZookeeperScaler implements AutoCloseable {
                 watchedEvent -> LOGGER.debugCr(reconciliation, "Received event {} from ZooKeeperAdmin client connected to {}", watchedEvent, zookeeperConnectionString),
                 clientConfig);
 
-            Util.waitFor(reconciliation, vertx,
+            VertxUtil.waitFor(reconciliation, vertx,
                 String.format("ZooKeeperAdmin connection to %s", zookeeperConnectionString),
                 "connected",
                 1_000,

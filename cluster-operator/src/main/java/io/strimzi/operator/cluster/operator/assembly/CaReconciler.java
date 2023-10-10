@@ -13,29 +13,27 @@ import io.strimzi.api.kafka.model.CruiseControlResources;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaExporterResources;
 import io.strimzi.api.kafka.model.KafkaResources;
+import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.certs.CertManager;
-import io.strimzi.operator.cluster.ClusterOperator;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
-import io.strimzi.operator.cluster.FeatureGates;
 import io.strimzi.operator.cluster.model.AbstractModel;
-import io.strimzi.operator.cluster.model.Ca;
-import io.strimzi.operator.cluster.model.ClientsCa;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.cluster.model.ClusterCa;
-import io.strimzi.operator.cluster.model.InvalidResourceException;
-import io.strimzi.operator.cluster.model.KafkaCluster;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.cluster.model.ModelUtils;
+import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.model.RestartReason;
 import io.strimzi.operator.cluster.model.RestartReasons;
 import io.strimzi.operator.cluster.operator.resource.KafkaRoller;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.cluster.operator.resource.StatefulSetOperator;
 import io.strimzi.operator.cluster.operator.resource.ZooKeeperRoller;
 import io.strimzi.operator.cluster.operator.resource.ZookeeperLeaderFinder;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.BackOff;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
@@ -45,15 +43,16 @@ import io.strimzi.operator.common.operator.resource.PodOperator;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.strimzi.operator.common.operator.resource.SecretOperator;
 import io.strimzi.operator.common.operator.resource.StrimziPodSetOperator;
-import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -63,13 +62,11 @@ import java.util.function.Function;
 public class CaReconciler {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(CaReconciler.class.getName());
 
-    private final Reconciliation reconciliation;
+    /* test */ final Reconciliation reconciliation;
     private final Vertx vertx;
     private final long operationTimeoutMs;
-    private final FeatureGates featureGates;
 
-    private final DeploymentOperator deploymentOperator;
-    private final StatefulSetOperator stsOperator;
+    /* test */ final DeploymentOperator deploymentOperator;
     private final StrimziPodSetOperator strimziPodSetOperator;
     private final SecretOperator secretOperator;
     private final PodOperator podOperator;
@@ -94,6 +91,9 @@ public class CaReconciler {
     private ClientsCa clientsCa;
     private Secret oldCoSecret;
 
+    /* test */ boolean isClusterCaNeedFullTrust;
+    /* test */ boolean isClusterCaFullyUsed;
+
     /**
      * Constructs the CA reconciler which reconciles the Cluster and Client CAs
      *
@@ -117,10 +117,8 @@ public class CaReconciler {
         this.reconciliation = reconciliation;
         this.vertx = vertx;
         this.operationTimeoutMs = config.getOperationTimeoutMs();
-        this.featureGates = config.featureGates();
 
         this.deploymentOperator = supplier.deploymentOperations;
-        this.stsOperator = supplier.stsOperations;
         this.strimziPodSetOperator = supplier.strimziPodSetOperator;
         this.secretOperator = supplier.secretOperations;
         this.podOperator = supplier.podOperations;
@@ -144,16 +142,8 @@ public class CaReconciler {
                 .build();
         this.clusterCaConfig = kafkaCr.getSpec().getClusterCa();
         this.clientsCaConfig = kafkaCr.getSpec().getClientsCa();
-        this.caLabels = Labels
-                .generateDefaultLabels(kafkaCr, Labels.APPLICATION_NAME, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME)
-                .toMap();
-        this.clusterOperatorSecretLabels = Labels.fromResource(kafkaCr)
-                .withStrimziKind(reconciliation.kind())
-                .withStrimziCluster(reconciliation.name())
-                .withKubernetesName(Labels.APPLICATION_NAME)
-                .withKubernetesInstance(reconciliation.name())
-                .withKubernetesPartOf(reconciliation.name())
-                .withKubernetesManagedBy(AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
+        this.caLabels = Labels.generateDefaultLabels(kafkaCr, Labels.APPLICATION_NAME, "certificate-authority", AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME).toMap();
+        this.clusterOperatorSecretLabels = Labels.generateDefaultLabels(kafkaCr, Labels.APPLICATION_NAME, Labels.APPLICATION_NAME, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
         this.clusterCaCertLabels = clusterCaCertLabels(kafkaCr);
         this.clusterCaCertAnnotations = clusterCaCertAnnotations(kafkaCr);
     }
@@ -207,6 +197,7 @@ public class CaReconciler {
      */
     public Future<CaReconciliationResult> reconcile(Clock clock)    {
         return reconcileCas(clock)
+                .compose(i -> verifyClusterCaFullyTrustedAndUsed())
                 .compose(i -> clusterOperatorSecret(clock))
                 .compose(i -> rollingUpdateForNewCaKey())
                 .compose(i -> maybeRemoveOldClusterCaCertificates())
@@ -289,8 +280,7 @@ public class CaReconciler {
                             clientsCaConfig != null && !clientsCaConfig.isGenerateSecretOwnerReference() ? null : ownerRef,
                             Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant()));
 
-                    @SuppressWarnings({ "rawtypes" }) // Has to use Raw type because of the CompositeFuture
-                    List<Future> secretReconciliations = new ArrayList<>(2);
+                    List<Future<ReconcileResult<Secret>>> secretReconciliations = new ArrayList<>(2);
 
                     if (clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority())   {
                         Future<ReconcileResult<Secret>> clusterSecretReconciliation = secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCa.caCertSecret())
@@ -304,7 +294,7 @@ public class CaReconciler {
                         secretReconciliations.add(clientsSecretReconciliation);
                     }
 
-                    CompositeFuture.join(secretReconciliations).onComplete(res -> {
+                    Future.join(secretReconciliations).onComplete(res -> {
                         if (res.succeeded())    {
                             future.complete();
                         } else {
@@ -339,12 +329,16 @@ public class CaReconciler {
 
     Future<Void> clusterOperatorSecret(Clock clock) {
         oldCoSecret = clusterCa.clusterOperatorSecret();
+        if (oldCoSecret != null && this.isClusterCaNeedFullTrust) {
+            LOGGER.warnCr(reconciliation, "Cluster CA needs to be fully trusted across the cluster, keeping current CO secret and certs");
+            return Future.succeededFuture();
+        }
         Secret secret = ModelUtils.buildSecret(
                 reconciliation,
                 clusterCa,
                 clusterCa.clusterOperatorSecret(),
                 reconciliation.namespace(),
-                ClusterOperator.secretName(reconciliation.name()),
+                KafkaResources.secretName(reconciliation.name()),
                 "cluster-operator",
                 "cluster-operator",
                 clusterOperatorSecretLabels,
@@ -352,7 +346,7 @@ public class CaReconciler {
                 Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())
         );
 
-        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), ClusterOperator.secretName(reconciliation.name()), secret)
+        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.secretName(reconciliation.name()), secret)
                 .map((Void) null);
     }
 
@@ -364,7 +358,9 @@ public class CaReconciler {
     Future<Void> rollingUpdateForNewCaKey() {
         RestartReasons podRollReasons = RestartReasons.empty();
 
-        if (clusterCa.keyReplaced()) {
+        // cluster CA needs to be fully trusted
+        // it is coming from a cluster CA key replacement which didn't end successfully (i.e. CO stopped) and we need to continue from there
+        if (clusterCa.keyReplaced() || isClusterCaNeedFullTrust) {
             podRollReasons.add(RestartReason.CLUSTER_CA_CERT_KEY_REPLACED);
         }
 
@@ -373,9 +369,10 @@ public class CaReconciler {
         }
 
         if (podRollReasons.shouldRestart()) {
-            return maybeRollZookeeper(podRollReasons)
+            return getZooKeeperReplicas()
+                    .compose(replicas -> maybeRollZookeeper(replicas, podRollReasons))
                     .compose(i -> getKafkaReplicas())
-                    .compose(replicas -> rollKafkaBrokers(replicas, podRollReasons))
+                    .compose(nodes -> rollKafkaBrokers(nodes, podRollReasons))
                     .compose(i -> maybeRollDeploymentIfExists(KafkaResources.entityOperatorDeploymentName(reconciliation.name()), podRollReasons))
                     .compose(i -> maybeRollDeploymentIfExists(KafkaExporterResources.deploymentName(reconciliation.name()), podRollReasons))
                     .compose(i -> maybeRollDeploymentIfExists(CruiseControlResources.deploymentName(reconciliation.name()), podRollReasons));
@@ -384,8 +381,109 @@ public class CaReconciler {
         }
     }
 
-    // ZooKeeper is rolled only for new Cluster CA key
-    private Future<Void> maybeRollZookeeper(RestartReasons podRestartReasons) {
+    /**
+     * Gather the Kafka related components pods for checking CA key trust and CA certificate usage to sign servers certificate.
+     *
+     * Verify that all the pods are already trusting the new CA certificate signed by a new CA key.
+     * It checks each pod's CA key generation, compared with the new CA key generation.
+     * When the trusting phase is not completed (i.e. because CO stopped), it needs to be recovered from where it was left.
+     *
+     * Verify that all pods are already using the new CA certificate to sign server certificates.
+     * It checks each pod's CA certificate generation, compared with the new CA certificate generation.
+     * When the new CA certificate is used everywhere, the old CA certificate can be removed.
+     */
+    /* test */ Future<Void> verifyClusterCaFullyTrustedAndUsed() {
+        isClusterCaNeedFullTrust = false;
+        isClusterCaFullyUsed = true;
+
+        // Building the selector for Kafka related components
+        Labels labels =  Labels.forStrimziCluster(reconciliation.name()).withStrimziKind(Kafka.RESOURCE_KIND);
+
+        return podOperator.listAsync(reconciliation.namespace(), labels)
+                .compose(pods -> {
+
+                    // still no Pods, a new Kafka cluster is under creation
+                    if (pods.isEmpty()) {
+                        isClusterCaFullyUsed = false;
+                        return Future.succeededFuture();
+                    }
+
+                    int clusterCaCertGeneration = clusterCa.certGeneration();
+                    int clusterCaKeyGeneration = clusterCa.keyGeneration();
+
+                    LOGGER.debugCr(reconciliation, "Current cluster CA cert generation {}", clusterCaCertGeneration);
+                    LOGGER.debugCr(reconciliation, "Current cluster CA key generation {}", clusterCaKeyGeneration);
+
+
+                    for (Pod pod : pods) {
+                        // with "RollingUpdate" strategy on Deployment(s) (i.e. the Cruise Control one),
+                        // while the Deployment is reported to be ready, the old pod is still alive but terminating
+                        // this condition is for skipping "Terminating" pods for checks on the CA key and old certificates
+                        if (pod.getMetadata().getDeletionTimestamp() == null) {
+                            int podClusterCaCertGeneration = Annotations.intAnnotation(pod, Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, clusterCaCertGeneration);
+                            LOGGER.debugCr(reconciliation, "Pod {} has cluster CA cert generation {}", pod.getMetadata().getName(), podClusterCaCertGeneration);
+
+                            int podClusterCaKeyGeneration = Annotations.intAnnotation(pod, Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, clusterCaKeyGeneration);
+                            LOGGER.debugCr(reconciliation, "Pod {} has cluster CA key generation {} compared to the Secret CA key generation {}",
+                                    pod.getMetadata().getName(), podClusterCaKeyGeneration, clusterCaKeyGeneration);
+
+                            // only if all Kafka related components pods are updated to the new cluster CA cert generation,
+                            // there is the possibility that we should remove the older cluster CA from the Secret and stores
+                            if (clusterCaCertGeneration != podClusterCaCertGeneration) {
+                                this.isClusterCaFullyUsed = false;
+                            }
+
+                            if (clusterCaKeyGeneration != podClusterCaKeyGeneration) {
+                                this.isClusterCaNeedFullTrust = true;
+                            }
+
+                        } else {
+                            LOGGER.debugCr(reconciliation, "Skipping CA key generation check on pod {}, it's terminating", pod.getMetadata().getName());
+                        }
+
+                        if (isClusterCaNeedFullTrust) {
+                            LOGGER.debugCr(reconciliation, "The new Cluster CA is not yet trusted by all pods");
+                        }
+                        if (!isClusterCaFullyUsed) {
+                            LOGGER.debugCr(reconciliation, "The old Cluster CA is still used by some server certificates and cannot be removed");
+                        }
+                    }
+                    return Future.succeededFuture();
+                });
+    }
+
+    /**
+     * If we need to roll the ZooKeeper cluster to roll out the trust to a new CA certificate when a CA private key is
+     * being replaced, we need to know what the current number of ZooKeeper nodes is. Getting it from the Kafka custom
+     * resource might not be good enough if a scale-up /scale-down is happening at the same time. So we get the
+     * StrimziPodSet and find out the correct number of ZooKeeper nodes from it.
+     *
+     * @return  Current number of ZooKeeper replicas
+     */
+    /* test */ Future<Integer> getZooKeeperReplicas() {
+        return strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
+                .compose(podSet -> {
+                    if (podSet != null
+                            && podSet.getSpec() != null
+                            && podSet.getSpec().getPods() != null) {
+                        return Future.succeededFuture(podSet.getSpec().getPods().size());
+                    } else {
+                        return Future.succeededFuture(0);
+                    }
+                });
+    }
+
+    /**
+     * Checks whether the ZooKeeper cluster needs ot be rolled to trust the new CA private key. ZooKeeper uses only the
+     * Cluster CA and not the Clients CA. So the rolling happens only when Cluster CA private key changed.
+     *
+     * @param replicas              Current number of ZooKeeper replicas
+     * @param podRestartReasons     List of reasons to restart the pods
+     *
+     * @return  Future which completes when this step is done either by rolling the ZooKeeper cluster or by deciding
+     *          that no rolling is needed.
+     */
+    /* test */ Future<Void> maybeRollZookeeper(int replicas, RestartReasons podRestartReasons) {
         if (podRestartReasons.contains(RestartReason.CLUSTER_CA_CERT_KEY_REPLACED)) {
             Labels zkSelectorLabels = Labels.EMPTY
                     .withStrimziKind(reconciliation.kind())
@@ -398,35 +496,33 @@ public class CaReconciler {
                 return reason;
             };
             return new ZooKeeperRoller(podOperator, zookeeperLeaderFinder, operationTimeoutMs)
-                    .maybeRollingUpdate(reconciliation, zkSelectorLabels, rollZkPodAndLogReason, clusterCa.caCertSecret(), oldCoSecret);
+                    .maybeRollingUpdate(reconciliation, replicas, zkSelectorLabels, rollZkPodAndLogReason, clusterCa.caCertSecret(), oldCoSecret);
         } else {
             return Future.succeededFuture();
         }
     }
 
-    private Future<List<String>> getKafkaReplicas() {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            return strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                                        .compose(podSet -> {
-                                            if (podSet != null) {
-                                                return Future.succeededFuture(KafkaCluster.generatePodList(reconciliation.name(), podSet.getSpec().getPods().size()));
-                                            } else {
-                                                return Future.succeededFuture(List.of());
-                                            }
-                                        });
-        } else {
-            return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                              .compose(sts -> {
-                                  if (sts != null) {
-                                      return Future.succeededFuture(KafkaCluster.generatePodList(reconciliation.name(), sts.getSpec().getReplicas()));
-                                  } else {
-                                      return Future.succeededFuture(List.of());
-                                  }
-                              });
-        }
+    /* test */ Future<Set<NodeRef>> getKafkaReplicas() {
+        Labels selectorLabels = Labels.EMPTY
+                .withStrimziKind(reconciliation.kind())
+                .withStrimziCluster(reconciliation.name())
+                .withStrimziName(KafkaResources.kafkaStatefulSetName(reconciliation.name()));
+
+        return strimziPodSetOperator.listAsync(reconciliation.namespace(), selectorLabels)
+                .compose(podSets -> {
+                    Set<NodeRef> nodes = new LinkedHashSet<>();
+
+                    if (podSets != null) {
+                        for (StrimziPodSet podSet : podSets) {
+                            nodes.addAll(ReconcilerUtils.nodesFromPodSet(podSet));
+                        }
+                    }
+
+                    return Future.succeededFuture(nodes);
+                });
     }
 
-    private Future<Void> rollKafkaBrokers(List<String> replicas, RestartReasons podRollReasons) {
+    /* test */ Future<Void> rollKafkaBrokers(Set<NodeRef> nodes, RestartReasons podRollReasons) {
         return new KafkaRoller(
                 reconciliation,
                 vertx,
@@ -434,7 +530,7 @@ public class CaReconciler {
                 1_000,
                 operationTimeoutMs,
                 () -> new BackOff(250, 2, 10),
-                replicas,
+                nodes,
                 clusterCa.caCertSecret(),
                 oldCoSecret,
                 adminClientProvider,
@@ -466,11 +562,11 @@ public class CaReconciler {
      *
      * @return  Succeeded future if it succeeded, failed otherwise.
      */
-    private Future<Void> rollDeploymentIfExists(String deploymentName, String reason)  {
+    Future<Void> rollDeploymentIfExists(String deploymentName, String reason)  {
         return deploymentOperator.getAsync(reconciliation.namespace(), deploymentName)
                 .compose(dep -> {
                     if (dep != null) {
-                        LOGGER.infoCr(reconciliation, "Rolling Deployment {} to {}", deploymentName, reason);
+                        LOGGER.infoCr(reconciliation, "Rolling Deployment {} due to {}", deploymentName, reason);
                         return deploymentOperator.rollingUpdate(reconciliation, reconciliation.namespace(), deploymentName, operationTimeoutMs);
                     } else {
                         return Future.succeededFuture();
@@ -483,56 +579,24 @@ public class CaReconciler {
      * corresponding CA private key.
      */
     Future<Void> maybeRemoveOldClusterCaCertificates() {
-        // Building the selector for Kafka related components
-        Labels labels =  Labels.forStrimziCluster(reconciliation.name()).withStrimziKind(Kafka.RESOURCE_KIND);
+        // if the new CA certificate is used to sign all server certificates
+        if (isClusterCaFullyUsed) {
+            LOGGER.debugCr(reconciliation, "Maybe there are old cluster CA certificates to remove");
+            clusterCa.maybeDeleteOldCerts();
 
-        return podOperator.listAsync(reconciliation.namespace(), labels)
-                .compose(pods -> {
-                    // still no Pods, a new Kafka cluster is under creation
-                    if (pods.isEmpty()) {
-                        return Future.succeededFuture();
-                    }
-
-                    int clusterCaCertGeneration = clusterCa.certGeneration();
-
-                    LOGGER.debugCr(reconciliation, "Current cluster CA cert generation {}", clusterCaCertGeneration);
-
-                    // only if all Kafka related components pods are updated to the new cluster CA cert generation,
-                    // there is the possibility that we should remove the older cluster CA from the Secret and stores
-                    for (Pod pod : pods) {
-                        int podClusterCaCertGeneration = Annotations.intAnnotation(pod, Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, clusterCaCertGeneration);
-                        LOGGER.debugCr(reconciliation, "Pod {} cluster CA cert generation {}", pod.getMetadata().getName(), podClusterCaCertGeneration);
-
-                        if (clusterCaCertGeneration != podClusterCaCertGeneration) {
-                            return Future.succeededFuture();
-                        }
-                    }
-
-                    LOGGER.debugCr(reconciliation, "Maybe there are old cluster CA certificates to remove");
-                    clusterCa.maybeDeleteOldCerts();
-
-                    return Future.succeededFuture(clusterCa);
-                })
-                .compose(ca -> {
-                    if (ca != null && ca.certsRemoved()) {
-                        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), AbstractModel.clusterCaCertSecretName(reconciliation.name()), ca.caCertSecret())
-                                .map((Void) null);
-                    } else {
-                        return Future.succeededFuture();
-                    }
-                });
+            if (clusterCa.certsRemoved()) {
+                return secretOperator.reconcile(reconciliation, reconciliation.namespace(), AbstractModel.clusterCaCertSecretName(reconciliation.name()), clusterCa.caCertSecret())
+                        .map((Void) null);
+            } else {
+                return Future.succeededFuture();
+            }
+        } else {
+            return Future.succeededFuture();
+        }
     }
 
     /**
      * Helper class to pass both Cluster and Clients CA as a result of the reconciliation
      */
-    public static class CaReconciliationResult {
-        public final ClusterCa clusterCa;
-        public final ClientsCa clientsCa;
-
-        public CaReconciliationResult(ClusterCa clusterCa, ClientsCa clientsCa) {
-            this.clusterCa = clusterCa;
-            this.clientsCa = clientsCa;
-        }
-    }
+    protected record CaReconciliationResult(ClusterCa clusterCa, ClientsCa clientsCa) { }
 }

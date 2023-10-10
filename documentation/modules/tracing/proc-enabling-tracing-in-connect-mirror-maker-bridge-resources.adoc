@@ -5,22 +5,46 @@
 [id='proc-enabling-tracing-in-connect-mirror-maker-bridge-resources-{context}']
 = Enabling tracing in MirrorMaker, Kafka Connect, and Kafka Bridge resources
 
-Update the configuration of `KafkaMirrorMaker`, `KafkaMirrorMaker2`, `KafkaConnect`, and `KafkaBridge` custom resources to specify and configure a Jaeger tracer service for each resource. Updating a tracing-enabled resource in your Kubernetes cluster triggers two events:
+[role="_abstract"]
+Distributed tracing is supported for MirrorMaker, MirrorMaker 2, Kafka Connect, and the Strimzi Kafka Bridge.
+Configure the custom resource of the component to specify and enable a tracer service. 
 
-* Interceptor classes are updated in the integrated consumers and producers in MirrorMaker, MirrorMaker 2.0, Kafka Connect, or the Strimzi Kafka Bridge.
+Enabling tracing in a resource triggers the following events:
 
-* For MirrorMaker, MirrorMaker 2.0, and Kafka Connect, the tracing agent initializes a Jaeger tracer based on the tracing configuration defined in the resource.
+* Interceptor classes are updated in the integrated consumers and producers of the component.
 
-* For the Kafka Bridge, a Jaeger tracer based on the tracing configuration defined in the resource is initialized by the Kafka Bridge itself.
+* For MirrorMaker, MirrorMaker 2, and Kafka Connect, the tracing agent initializes a tracer based on the tracing configuration defined in the resource.
+
+* For the Kafka Bridge, a tracer based on the tracing configuration defined in the resource is initialized by the Kafka Bridge itself.
+
+You can enable tracing that uses OpenTelemetry.
+
+.Tracing in MirrorMaker and MirrorMaker 2
+
+For MirrorMaker and MirrorMaker 2, messages are traced from the source cluster to the target cluster. The trace data records messages entering and leaving the MirrorMaker or MirrorMaker 2 component.
+
+.Tracing in Kafka Connect
+
+For Kafka Connect, only messages produced and consumed by Kafka Connect are traced. To trace messages sent between Kafka Connect and external systems, you must configure tracing in the connectors for those systems.
+
+.Tracing in the Kafka Bridge
+
+For the Kafka Bridge, messages produced and consumed by the Kafka Bridge are traced. Incoming HTTP requests from client applications to send and receive messages through the Kafka Bridge are also traced.
+To have end-to-end tracing, you must configure tracing in your HTTP clients.
 
 .Procedure
 
 Perform these steps for each `KafkaMirrorMaker`, `KafkaMirrorMaker2`, `KafkaConnect`, and `KafkaBridge` resource.
 
-. In the `spec.template` property, configure the Jaeger tracer service. For example:
+. In the `spec.template` property, configure the tracer service.
 +
 --
-.Jaeger tracer configuration for Kafka Connect
+* Use the xref:ref-tracing-environment-variables-{context}[tracing environment variables] as template configuration properties.
+* For OpenTelemetry, set the `spec.tracing.type` property to `opentelemetry`.
+--
++
+--
+.Example tracing configuration for Kafka Connect using OpenTelemetry
 [source,yaml,subs=attributes+]
 ----
 apiVersion: {KafkaConnectApiVersion}
@@ -30,20 +54,18 @@ metadata:
 spec:
   #...
   template:
-    connectContainer: <1>
+    connectContainer:
       env:
-        - name: JAEGER_SERVICE_NAME
-          value: my-jaeger-service
-        - name: JAEGER_AGENT_HOST
-          value: jaeger-agent-name
-        - name: JAEGER_AGENT_PORT
-          value: "6831"
-  tracing: <2>
-    type: jaeger
+        - name: OTEL_SERVICE_NAME
+          value: my-otel-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otlp-host:4317"
+  tracing:
+    type: opentelemetry
   #...
 ----
 
-.Jaeger tracer configuration for MirrorMaker
+.Example tracing configuration for MirrorMaker using OpenTelemetry
 [source,yaml,subs=attributes+]
 ----
 apiVersion: {KafkaMirrorMakerApiVersion}
@@ -55,18 +77,16 @@ spec:
   template:
     mirrorMakerContainer:
       env:
-        - name: JAEGER_SERVICE_NAME
-          value: my-jaeger-service
-        - name: JAEGER_AGENT_HOST
-          value: jaeger-agent-name
-        - name: JAEGER_AGENT_PORT
-          value: "6831"
+        - name: OTEL_SERVICE_NAME
+          value: my-otel-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otlp-host:4317"
   tracing:
-    type: jaeger
+    type: opentelemetry
 #...
 ----
 
-.Jaeger tracer configuration for MirrorMaker 2.0
+.Example tracing configuration for MirrorMaker 2 using OpenTelemetry
 [source,yaml,subs=attributes+]
 ----
 apiVersion: {KafkaMirrorMaker2ApiVersion}
@@ -78,18 +98,16 @@ spec:
   template:
     connectContainer:
       env:
-        - name: JAEGER_SERVICE_NAME
-          value: my-jaeger-service
-        - name: JAEGER_AGENT_HOST
-          value: jaeger-agent-name
-        - name: JAEGER_AGENT_PORT
-          value: "6831"
+        - name: OTEL_SERVICE_NAME
+          value: my-otel-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otlp-host:4317"
   tracing:
-    type: jaeger
+    type: opentelemetry
 #...
 ----
 
-.Jaeger tracer configuration for the Kafka Bridge
+.Example tracing configuration for the Kafka Bridge using OpenTelemetry
 [source,yaml,subs=attributes+]
 ----
 apiVersion: {KafkaBridgeApiVersion}
@@ -101,29 +119,19 @@ spec:
   template:
     bridgeContainer:
       env:
-        - name: JAEGER_SERVICE_NAME
-          value: my-jaeger-service
-        - name: JAEGER_AGENT_HOST
-          value: jaeger-agent-name
-        - name: JAEGER_AGENT_PORT
-          value: "6831"
+        - name: OTEL_SERVICE_NAME
+          value: my-otel-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otlp-host:4317"
   tracing:
-    type: jaeger
+    type: opentelemetry
 #...
 ----
-<1> Use the xref:ref-tracing-environment-variables-{context}[tracing environment variables] as template configuration properties.
-<2> Set the `spec.tracing.type` property to `jaeger`.
 --
 
 . Create or update the resource:
 +
-[source,shell,subs=attributes+]
+[source,shell,subs="+quotes"]
 ----
-kubectl apply -f your-file
+kubectl apply -f _<resource_configuration_file>_
 ----
-
-[role="_additional-resources"]
-.Additional resources
-
-* xref:type-ContainerTemplate-reference[]
-* xref:assembly-customizing-kubernetes-resources-{context}[]

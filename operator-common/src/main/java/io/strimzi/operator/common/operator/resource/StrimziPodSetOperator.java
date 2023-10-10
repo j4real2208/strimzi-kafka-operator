@@ -15,42 +15,43 @@ import io.vertx.core.Vertx;
  * Operator for {@code StrimziPodSet}s
  */
 public class StrimziPodSetOperator extends CrdOperator<KubernetesClient, StrimziPodSet, StrimziPodSetList> {
-    protected final long operationTimeoutMs;
 
     /**
      * Constructs the StrimziPodSet operator
      *
-     * @param vertx                 The Vertx instance.
-     * @param client                The Kubernetes client.
-     * @param operationTimeoutMs    The timeout.
+     * @param vertx  The Vertx instance.
+     * @param client The Kubernetes client.
      */
-    public StrimziPodSetOperator(Vertx vertx, KubernetesClient client, long operationTimeoutMs) {
+    public StrimziPodSetOperator(Vertx vertx, KubernetesClient client) {
         super(vertx, client, StrimziPodSet.class, StrimziPodSetList.class, StrimziPodSet.RESOURCE_KIND);
-        this.operationTimeoutMs = operationTimeoutMs;
     }
 
     /**
-     * Creates the StrimziPodSet and waits for the pods to become ready.
+     * StrimziPodSetOperator overrides this method in order to use replace instead of patch.
+     *
+     * @param name          Name of the resource
+     * @param desired       Desired resource
+     *
+     * @return  The patched or replaced resource
+     */
+    @Override
+    protected StrimziPodSet patchOrReplace(String namespace, String name, StrimziPodSet desired)   {
+        return operation().inNamespace(namespace).resource(desired).update();
+    }
+
+    /**
+     * Waits for StrimziPodSet to get ready
      *
      * @param reconciliation    Reconciliation marker
      * @param namespace         Namespace of the StrimziPodSet
      * @param name              Name of the StrimziPodSet
-     * @param desired           The desired StrimziPodSet
+     * @param pollIntervalMs    How often should it poll for readiness
+     * @param timeoutMs         How long should it wait for the resource to get ready
      *
-     * @return  Reconciliation result with the created StrimziPodSet
+     * @return  A future which completes when the resource is ready or times out
      */
-    @Override
-    protected Future<ReconcileResult<StrimziPodSet>> internalCreate(Reconciliation reconciliation, String namespace, String name, StrimziPodSet desired) {
-        Future<ReconcileResult<StrimziPodSet>> create = super.internalCreate(reconciliation, namespace, name, desired);
-
-        // If it failed, we return immediately ...
-        if (create.failed()) {
-            return create;
-        }
-
-        // ... if it created, we wait for the PodSet / its pods to become ready and once they do, we return the original reconciliation result.
-        return create.compose(i -> waitFor(reconciliation, namespace, name, "ready", 1_000L, operationTimeoutMs, this::isReady))
-                .map(create.result());
+    public Future<Void> readiness(Reconciliation reconciliation, String namespace, String name, long pollIntervalMs, long timeoutMs) {
+        return waitFor(reconciliation, namespace, name, pollIntervalMs, timeoutMs, this::isReady);
     }
 
     /**

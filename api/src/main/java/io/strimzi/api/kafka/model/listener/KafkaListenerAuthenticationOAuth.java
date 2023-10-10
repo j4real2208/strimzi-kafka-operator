@@ -45,6 +45,7 @@ public class KafkaListenerAuthenticationOAuth extends KafkaListenerAuthenticatio
     private Integer jwksRefreshSeconds;
     private Integer jwksMinRefreshPauseSeconds;
     private Integer jwksExpirySeconds;
+    private boolean jwksIgnoreKeyUse = false;
     private String introspectionEndpointUri;
     private String userNameClaim;
     private String fallbackUserNameClaim;
@@ -65,8 +66,12 @@ public class KafkaListenerAuthenticationOAuth extends KafkaListenerAuthenticatio
     private String customClaimCheck;
     private Integer connectTimeoutSeconds;
     private Integer readTimeoutSeconds;
+    private Integer httpRetries;
+    private Integer httpRetryPauseMs;
     private String clientScope = null;
     private String clientAudience = null;
+    private boolean enableMetrics = false;
+    private boolean failFast = true;
 
     @Description("Must be `" + TYPE_OAUTH + "`")
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -160,6 +165,26 @@ public class KafkaListenerAuthenticationOAuth extends KafkaListenerAuthenticatio
         this.readTimeoutSeconds = readTimeoutSeconds;
     }
 
+    @Description("The maximum number of retries to attempt if an initial HTTP request fails. If not set, the default is to not attempt any retries.")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getHttpRetries() {
+        return httpRetries;
+    }
+
+    public void setHttpRetries(Integer httpRetries) {
+        this.httpRetries = httpRetries;
+    }
+
+    @Description("The pause to take before retrying a failed HTTP request. If not set, the default is to not pause at all but to immediately repeat a request.")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getHttpRetryPauseMs() {
+        return httpRetryPauseMs;
+    }
+
+    public void setHttpRetryPauseMs(Integer httpRetryPauseMs) {
+        this.httpRetryPauseMs = httpRetryPauseMs;
+    }
+
     @Description("The scope to use when making requests to the authorization server's token endpoint. Used for inter-broker authentication and for configuring OAuth 2.0 over PLAIN using the `clientId` and `secret` method.")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public String getClientScope() {
@@ -228,6 +253,16 @@ public class KafkaListenerAuthenticationOAuth extends KafkaListenerAuthenticatio
 
     public void setJwksExpirySeconds(Integer jwksExpirySeconds) {
         this.jwksExpirySeconds = jwksExpirySeconds;
+    }
+
+    @Description("Flag to ignore the 'use' attribute of `key` declarations in a JWKS endpoint response. Default value is `false`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean getJwksIgnoreKeyUse() {
+        return jwksIgnoreKeyUse;
+    }
+
+    public void setJwksIgnoreKeyUse(boolean jwksIgnoreKeyUse) {
+        this.jwksIgnoreKeyUse = jwksIgnoreKeyUse;
     }
 
     @Description("URI of the token introspection endpoint which can be used to validate opaque non-JWT tokens.")
@@ -416,4 +451,23 @@ public class KafkaListenerAuthenticationOAuth extends KafkaListenerAuthenticatio
         this.tokenEndpointUri = tokenEndpointUri;
     }
 
+    @Description("Enable or disable OAuth metrics. Default value is `false`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean isEnableMetrics() {
+        return enableMetrics;
+    }
+
+    public void setEnableMetrics(boolean enableMetrics) {
+        this.enableMetrics = enableMetrics;
+    }
+
+    @Description("Enable or disable termination of Kafka broker processes due to potentially recoverable runtime errors during startup. Default value is `true`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean getFailFast() {
+        return failFast;
+    }
+
+    public void setFailFast(boolean failFast) {
+        this.failFast = failFast;
+    }
 }

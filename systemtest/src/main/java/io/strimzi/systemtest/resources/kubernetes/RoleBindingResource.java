@@ -28,23 +28,29 @@ public class RoleBindingResource implements ResourceType<RoleBinding> {
     }
     @Override
     public void create(RoleBinding resource) {
-        ResourceManager.kubeClient().namespace(resource.getMetadata().getNamespace()).createOrReplaceRoleBinding(resource);
+        ResourceManager.kubeClient().namespace(resource.getMetadata().getNamespace()).createOrUpdateRoleBinding(resource);
     }
     @Override
     public void delete(RoleBinding resource) {
         ResourceManager.kubeClient().namespace(resource.getMetadata().getNamespace()).deleteRoleBinding(resource.getMetadata().getNamespace(), resource.getMetadata().getName());
     }
+
+    @Override
+    public void update(RoleBinding resource) {
+        ResourceManager.kubeClient().namespace(resource.getMetadata().getNamespace()).createOrUpdateRoleBinding(resource);
+    }
+
     @Override
     public boolean waitForReadiness(RoleBinding resource) {
         return resource != null;
     }
 
     public static void roleBinding(ExtensionContext extensionContext, String yamlPath, String namespace, String clientNamespace) {
-        LOGGER.info("Creating RoleBinding in test case {} from {} in namespace {}",
+        LOGGER.info("Creating RoleBinding in test case {} from {} in Namespace: {}",
                 extensionContext.getDisplayName(), yamlPath, namespace);
         RoleBinding roleBinding = getRoleBindingFromYaml(yamlPath);
 
-        ResourceManager.getInstance().createResource(extensionContext, new RoleBindingBuilder(roleBinding)
+        ResourceManager.getInstance().createResourceWithWait(extensionContext, new RoleBindingBuilder(roleBinding)
             .editMetadata()
                 .withNamespace(clientNamespace)
             .endMetadata()

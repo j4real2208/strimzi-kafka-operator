@@ -23,15 +23,16 @@ import io.fabric8.kubernetes.api.model.TolerationBuilder;
 import io.fabric8.kubernetes.api.model.TopologySpreadConstraint;
 import io.fabric8.kubernetes.api.model.TopologySpreadConstraintBuilder;
 import io.strimzi.api.kafka.model.ContainerEnvVar;
+import io.strimzi.api.kafka.model.JvmOptions;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaBuilder;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.api.kafka.model.Probe;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.storage.PersistentClaimStorageBuilder;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
-import io.strimzi.operator.cluster.operator.resource.PodRevision;
+import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.OrderedProperties;
 import io.strimzi.platform.KubernetesVersion;
@@ -60,6 +61,7 @@ import static org.hamcrest.Matchers.hasProperty;
 @ParallelSuite
 public class ZookeeperClusterPodSetTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
     private static final String NAMESPACE = "my-namespace";
     private static final String CLUSTER = "my-cluster";
 
@@ -83,45 +85,44 @@ public class ZookeeperClusterPodSetTest {
                 .endKafka()
             .endSpec()
             .build();
-    private final static ZookeeperCluster ZC = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+    private final static ZookeeperCluster ZC = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, SHARED_ENV_PROVIDER);
 
     @ParallelTest
     public void testPodSet()   {
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        StrimziPodSet ps = zc.generatePodSet(3, true, null, null, Map.of());
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = zc.generatePodSet(3, true, null, null, podNumber -> Map.of());
 
         assertThat(ps.getMetadata().getName(), is(KafkaResources.zookeeperStatefulSetName(CLUSTER)));
-        assertThat(ps.getMetadata().getLabels().entrySet().containsAll(zc.getLabelsWithStrimziName(zc.getName(), null).toMap().entrySet()), is(true));
-        assertThat(ps.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_STORAGE), is(ModelUtils.encodeStorageToJson(new PersistentClaimStorageBuilder().withSize("100Gi").withDeleteClaim(false).build())));
-        assertThat(ps.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(ps.getMetadata().getOwnerReferences().get(0), is(zc.createOwnerReference()));
+        assertThat(ps.getMetadata().getLabels().entrySet().containsAll(zc.labels.withAdditionalLabels(null).toMap().entrySet()), is(true));
+        assertThat(ps.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_STORAGE), is(ModelUtils.encodeStorageToJson(new PersistentClaimStorageBuilder().withSize("100Gi").withDeleteClaim(false).build())));
+        TestUtils.checkOwnerReference(ps, KAFKA);
         assertThat(ps.getSpec().getSelector().getMatchLabels(), is(zc.getSelectorLabels().toMap()));
         assertThat(ps.getSpec().getPods().size(), is(3));
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods)  {
-            assertThat(pod.getMetadata().getLabels().entrySet().containsAll(zc.getLabelsWithStrimziNameAndPodName(zc.getName(), pod.getMetadata().getName(), null).withStatefulSetPod(pod.getMetadata().getName()).withStrimziPodSetController(zc.getName()).toMap().entrySet()), is(true));
+            assertThat(pod.getMetadata().getLabels().entrySet().containsAll(zc.labels.withStrimziPodName(pod.getMetadata().getName()).withStatefulSetPod(pod.getMetadata().getName()).withStrimziPodSetController(zc.getComponentName()).toMap().entrySet()), is(true));
             assertThat(pod.getMetadata().getAnnotations().size(), is(1));
             assertThat(pod.getMetadata().getAnnotations().get(PodRevision.STRIMZI_REVISION_ANNOTATION), is(notNullValue()));
 
             assertThat(pod.getSpec().getHostname(), is(pod.getMetadata().getName()));
-            assertThat(pod.getSpec().getSubdomain(), is(zc.getHeadlessServiceName()));
+            assertThat(pod.getSpec().getSubdomain(), is(KafkaResources.zookeeperHeadlessServiceName(CLUSTER)));
             assertThat(pod.getSpec().getRestartPolicy(), is("Always"));
             assertThat(pod.getSpec().getTerminationGracePeriodSeconds(), is(30L));
             assertThat(pod.getSpec().getVolumes().stream()
                     .filter(volume -> volume.getName().equalsIgnoreCase("strimzi-tmp"))
-                    .findFirst().orElseThrow().getEmptyDir().getSizeLimit(), is(new Quantity(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
+                    .findFirst().orElseThrow().getEmptyDir().getSizeLimit(), is(new Quantity(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
 
             assertThat(pod.getSpec().getContainers().size(), is(1));
             assertThat(pod.getSpec().getContainers().get(0).getLivenessProbe().getTimeoutSeconds(), is(5));
             assertThat(pod.getSpec().getContainers().get(0).getLivenessProbe().getInitialDelaySeconds(), is(15));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getTimeoutSeconds(), is(5));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getInitialDelaySeconds(), is(15));
-            assertThat(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is(Boolean.toString(AbstractModel.DEFAULT_JVM_GC_LOGGING_ENABLED)));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(AbstractModel.VOLUME_NAME));
+            assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is(Boolean.toString(JvmOptions.DEFAULT_GC_LOGGING_ENABLED)));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(VolumeUtils.DATA_VOLUME_NAME));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is("/var/lib/zookeeper"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getName(), is("zookeeper-metrics-and-logging"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getMountPath(), is("/opt/kafka/custom-config/"));
@@ -132,7 +133,7 @@ public class ZookeeperClusterPodSetTest {
 
             // Config
             OrderedProperties expectedConfig = new OrderedProperties().addMapPairs(ZookeeperConfiguration.DEFAULTS);
-            OrderedProperties actual = new OrderedProperties().addStringPairs(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_ZOOKEEPER_CONFIGURATION));
+            OrderedProperties actual = new OrderedProperties().addStringPairs(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_ZOOKEEPER_CONFIGURATION));
             assertThat(actual, is(expectedConfig));
         }
     }
@@ -277,8 +278,8 @@ public class ZookeeperClusterPodSetTest {
                 .build();
 
         // Test the resources
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet ps = zc.generatePodSet(3, true, null, null, Map.of("special", "annotation"));
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = zc.generatePodSet(3, true, null, null, podNum -> Map.of("special", "annotation"));
 
         assertThat(ps.getMetadata().getName(), is(KafkaResources.zookeeperStatefulSetName(CLUSTER)));
         assertThat(ps.getMetadata().getLabels().entrySet().containsAll(spsLabels.entrySet()), is(true));
@@ -287,7 +288,7 @@ public class ZookeeperClusterPodSetTest {
         assertThat(ps.getSpec().getPods().size(), is(3));
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods)  {
             assertThat(pod.getMetadata().getLabels().entrySet().containsAll(podLabels.entrySet()), is(true));
             assertThat(pod.getMetadata().getAnnotations().entrySet().containsAll(podAnnos.entrySet()), is(true));
@@ -334,10 +335,10 @@ public class ZookeeperClusterPodSetTest {
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getFailureThreshold(), is(readinessProbe.getFailureThreshold()));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getSuccessThreshold(), is(readinessProbe.getSuccessThreshold()));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getPeriodSeconds(), is(readinessProbe.getPeriodSeconds()));
-            assertThat(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is("true"));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(AbstractModel.VOLUME_NAME));
+            assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is("true"));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(VolumeUtils.DATA_VOLUME_NAME));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is("/var/lib/zookeeper"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getName(), is("zookeeper-metrics-and-logging"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getMountPath(), is("/opt/kafka/custom-config/"));
@@ -348,7 +349,7 @@ public class ZookeeperClusterPodSetTest {
 
             OrderedProperties expectedConfig = new OrderedProperties().addMapPairs(ZookeeperConfiguration.DEFAULTS).addPair("foo", "bar");
             OrderedProperties actual = new OrderedProperties()
-                    .addStringPairs(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_ZOOKEEPER_CONFIGURATION));
+                    .addStringPairs(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(ZookeeperCluster.ENV_VAR_ZOOKEEPER_CONFIGURATION));
             assertThat(actual, is(expectedConfig));
         }
     }
@@ -371,11 +372,11 @@ public class ZookeeperClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet sps = zc.generatePodSet(3, true, null, null, Map.of());
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS, SHARED_ENV_PROVIDER);
+        StrimziPodSet sps = zc.generatePodSet(3, true, null, null, podNum -> Map.of());
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(sps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(sps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(2));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(true));
@@ -392,11 +393,11 @@ public class ZookeeperClusterPodSetTest {
         secrets.add(secret1);
         secrets.add(secret2);
 
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        StrimziPodSet ps = zc.generatePodSet(3, true, null, secrets, Map.of());
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = zc.generatePodSet(3, true, null, secrets, podNum -> Map.of());
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(2));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(true));
@@ -422,11 +423,11 @@ public class ZookeeperClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet ps = zc.generatePodSet(3, true, null, List.of(secret1), Map.of());
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = zc.generatePodSet(3, true, null, List.of(secret1), podNum -> Map.of());
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(1));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(false));
@@ -436,29 +437,29 @@ public class ZookeeperClusterPodSetTest {
 
     @ParallelTest
     public void testImagePullPolicy() {
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Test ALWAYS policy
-        StrimziPodSet ps = zc.generatePodSet(3, true, ImagePullPolicy.ALWAYS, null, Map.of());
+        StrimziPodSet ps = zc.generatePodSet(3, true, ImagePullPolicy.ALWAYS, null, podNum -> Map.of());
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getContainers().get(0).getImagePullPolicy(), is(ImagePullPolicy.ALWAYS.toString()));
         }
 
         // Test IFNOTPRESENT policy
-        ps = zc.generatePodSet(3, true, ImagePullPolicy.IFNOTPRESENT, null, Map.of());
+        ps = zc.generatePodSet(3, true, ImagePullPolicy.IFNOTPRESENT, null, podNum -> Map.of());
 
         // We need to loop through the pods to make sure they have the right values
-        pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getContainers().get(0).getImagePullPolicy(), is(ImagePullPolicy.IFNOTPRESENT.toString()));
         }
     }
 
     @ParallelTest
-    public void testGenerateStatefulSetWithSetSizeLimit() {
+    public void testGeneratePodSetWithSetSizeLimit() {
         String sizeLimit = "1Gi";
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
@@ -467,18 +468,18 @@ public class ZookeeperClusterPodSetTest {
                     .endZookeeper()
                 .endSpec()
                 .build();
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, Map.of());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, podNum -> Map.of());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
-            assertThat(pod.getSpec().getVolumes().get(0).getEmptyDir().getSizeLimit(), is(new Quantity("1", "Gi")));
+            assertThat(pod.getSpec().getVolumes().get(4).getEmptyDir().getSizeLimit(), is(new Quantity("1", "Gi")));
         }
     }
 
     @ParallelTest
-    public void testGenerateStatefulSetWithEmptySizeLimit() {
+    public void testGeneratePodSetWithEmptySizeLimit() {
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editZookeeper()
@@ -487,13 +488,13 @@ public class ZookeeperClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, Map.of());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, podNum -> Map.of());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
-            assertThat(pod.getSpec().getVolumes().get(0).getEmptyDir().getSizeLimit(), is(Matchers.nullValue()));
+            assertThat(pod.getSpec().getVolumes().get(4).getEmptyDir().getSizeLimit(), is(Matchers.nullValue()));
         }
     }
 
@@ -506,11 +507,11 @@ public class ZookeeperClusterPodSetTest {
                     .endZookeeper()
                 .endSpec()
                 .build();
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, Map.of());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, podNum -> Map.of());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getVolumes().stream().filter(v -> "data".equals(v.getName())).findFirst().orElseThrow().getEmptyDir(), is(notNullValue()));
         }
@@ -522,13 +523,13 @@ public class ZookeeperClusterPodSetTest {
 
     @ParallelTest
     public void testRestrictedSecurityContext() {
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, SHARED_ENV_PROVIDER);
         zc.securityProvider = new RestrictedPodSecurityProvider();
         zc.securityProvider.configure(new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION));
 
         // Test generated SPS
-        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, Map.of());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = zc.generatePodSet(3, false, null, null, podNum -> Map.of());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getSecurityContext().getFsGroup(), is(0L));
 
@@ -546,13 +547,13 @@ public class ZookeeperClusterPodSetTest {
                     .addToLabels("foo", "bar")
                 .endMetadata()
                 .build();
-        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        ZookeeperCluster zc = ZookeeperCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet sps = zc.generatePodSet(3, false, null, null, Map.of());
+        StrimziPodSet sps = zc.generatePodSet(3, false, null, null, podNum -> Map.of());
         assertThat(sps.getMetadata().getLabels().get("foo"), is("bar"));
 
-        List<Pod> pods = PodSetUtils.mapsToPods(sps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(sps);
         for (Pod pod : pods) {
             assertThat(pod.getMetadata().getLabels().get("foo"), is("bar"));
         }
@@ -560,9 +561,9 @@ public class ZookeeperClusterPodSetTest {
 
     @ParallelTest
     public void testDefaultSecurityContext() {
-        StrimziPodSet sps = ZC.generatePodSet(3, false, null, null, Map.of());
+        StrimziPodSet sps = ZC.generatePodSet(3, false, null, null, podNum -> Map.of());
 
-        List<Pod> pods = PodSetUtils.mapsToPods(sps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(sps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getSecurityContext().getFsGroup(), is(0L));
             assertThat(pod.getSpec().getContainers().get(0).getSecurityContext(), is(nullValue()));

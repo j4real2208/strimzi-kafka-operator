@@ -10,9 +10,19 @@ import io.vertx.core.Future;
  * Cruise Control REST API interface definition
  */
 public interface CruiseControlApi {
-
+    /**
+     * Error key
+     */
     String CC_REST_API_ERROR_KEY = "errorMessage";
+
+    /**
+     * Progress key
+     */
     String CC_REST_API_PROGRESS_KEY = "progress";
+
+    /**
+     * User ID header key
+     */
     String CC_REST_API_USER_ID_HEADER = "User-Task-ID";
 
     /**
@@ -84,7 +94,7 @@ public interface CruiseControlApi {
      *
      * @param host The address of the Cruise Control server.
      * @param port The port the Cruise Control Server is listening on.
-     * @return A furture for the response from the Cruise Control server indicating if the stop command was issued.
+     * @return A future for the response from the Cruise Control server indicating if the stop command was issued.
      */
     Future<CruiseControlResponse> stopExecution(String host, int port);
 }

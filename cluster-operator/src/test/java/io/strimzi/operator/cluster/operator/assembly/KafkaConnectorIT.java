@@ -11,14 +11,14 @@ import io.strimzi.api.kafka.Crds;
 import io.strimzi.api.kafka.model.KafkaConnector;
 import io.strimzi.api.kafka.model.KafkaConnectorBuilder;
 import io.strimzi.api.kafka.model.status.Condition;
+import io.strimzi.api.kafka.model.status.KafkaConnectorStatus;
 import io.strimzi.platform.KubernetesVersion;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.operator.resource.DefaultZookeeperScalerProvider;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.ZookeeperLeaderFinder;
-import io.strimzi.operator.common.AbstractOperator;
 import io.strimzi.operator.common.BackOff;
 import io.strimzi.operator.common.DefaultAdminClientProvider;
 import io.strimzi.operator.common.MetricsProvider;
@@ -26,6 +26,8 @@ import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.test.container.StrimziKafkaCluster;
 import io.strimzi.test.mockkube2.MockKube2;
+import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
@@ -43,10 +45,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.io.IOException;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -117,7 +120,7 @@ public class KafkaConnectorIT {
     public void testConnectorNotUpdatedWhenConfigUnchanged(VertxTestContext context) {
         KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl(vertx);
 
-        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_20);
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_21);
 
         String namespace = "ns";
         String connectorName = "my-connector";
@@ -132,7 +135,7 @@ public class KafkaConnectorIT {
         config.put(TestingConnector.NUM_PARTITIONS, 1);
         config.put(TestingConnector.TOPIC_NAME, "my-topic");
 
-        KafkaConnector connector = createKafkaConnector(namespace, connectorName, config);
+        KafkaConnector connector = createKafkaConnector(namespace, connectorName, false, config);
         Crds.kafkaConnectorOperation(client).inNamespace(namespace).resource(connector).create();
 
         MetricsProvider metrics = new MicrometerMetricsProvider();
@@ -147,7 +150,7 @@ public class KafkaConnectorIT {
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
-                ClusterOperatorConfig.fromMap(Collections.emptyMap(), KafkaVersionTestUtils.getKafkaVersionLookup()),
+                ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
             connect -> new KafkaConnectApiImpl(vertx),
             connectCluster.getPort(2)
         ) { };
@@ -162,7 +165,7 @@ public class KafkaConnectorIT {
                 config.put(TestingConnector.START_TIME_MS, 1_000);
                 Crds.kafkaConnectorOperation(client)
                         .inNamespace(namespace)
-                        .resource(createKafkaConnector(namespace, connectorName, config))
+                        .resource(createKafkaConnector(namespace, connectorName, false, config))
                         .patch();
                 return operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
                         "localhost", connectClient, true, connectorName, connector);
@@ -186,7 +189,7 @@ public class KafkaConnectorIT {
     public void testConnectorResourceNotReadyWhenConnectorFailed(VertxTestContext context) {
         KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl(vertx);
 
-        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_20);
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_21);
 
         String namespace = "ns";
         String connectorName = "my-connector-2";
@@ -202,7 +205,7 @@ public class KafkaConnectorIT {
         config.put(TestingConnector.NUM_PARTITIONS, 1);
         config.put(TestingConnector.TOPIC_NAME, "my-topic");
 
-        KafkaConnector connector = createKafkaConnector(namespace, connectorName, config);
+        KafkaConnector connector = createKafkaConnector(namespace, connectorName, false, config);
         Crds.kafkaConnectorOperation(client).inNamespace(namespace).resource(connector).create();
 
         MetricsProvider metrics = new MicrometerMetricsProvider();
@@ -217,7 +220,7 @@ public class KafkaConnectorIT {
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
-                ClusterOperatorConfig.fromMap(Collections.emptyMap(), KafkaVersionTestUtils.getKafkaVersionLookup()),
+                ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
                 connect -> new KafkaConnectApiImpl(vertx),
                 connectCluster.getPort(2)
         ) { };
@@ -235,7 +238,7 @@ public class KafkaConnectorIT {
     public void testConnectorResourceNotReadyWhenTaskFailed(VertxTestContext context) {
         KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl(vertx);
 
-        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_20);
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_21);
 
         String namespace = "ns";
         String connectorName = "my-connector-3";
@@ -251,7 +254,7 @@ public class KafkaConnectorIT {
         config.put(TestingConnector.NUM_PARTITIONS, 1);
         config.put(TestingConnector.TOPIC_NAME, "my-topic");
 
-        KafkaConnector connector = createKafkaConnector(namespace, connectorName, config);
+        KafkaConnector connector = createKafkaConnector(namespace, connectorName, false, config);
         Crds.kafkaConnectorOperation(client).inNamespace(namespace).resource(connector).create();
 
         MetricsProvider metrics = new MicrometerMetricsProvider();
@@ -266,7 +269,7 @@ public class KafkaConnectorIT {
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
-                ClusterOperatorConfig.fromMap(Collections.emptyMap(), KafkaVersionTestUtils.getKafkaVersionLookup()),
+                ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
                 connect -> new KafkaConnectApiImpl(vertx),
                 connectCluster.getPort(2)
         ) { };
@@ -274,13 +277,134 @@ public class KafkaConnectorIT {
         operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
                         "localhost", connectClient, true, connectorName,
                         connector)
-                .onComplete(context.succeeding(v -> {
+                .compose(v -> {
+                    // Sometimes task status doesn't appear on first reconcile if tasks haven't started yet
+                    if (taskStatusIsPresent(client, namespace, connectorName)) {
+                        return Future.succeededFuture();
+                    } else {
+                        Promise<Void> promise = Promise.promise();
+                        vertx.setTimer(2000, id -> operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
+                                        "localhost", connectClient, true, connectorName, connector)
+                                .onComplete(result -> promise.complete(result.result())));
+                        return promise.future();
+                    }
+                }).onComplete(context.succeeding(v -> {
                     assertConnectorTaskIsNotReady(context, client, namespace, connectorName);
                     context.completeNow();
                 }));
     }
 
-    private KafkaConnector createKafkaConnector(String namespace, String connectorName, LinkedHashMap<String, Object> config) {
+    @Test
+    public void testConnectorIsAutoRestarted(VertxTestContext context) {
+        KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl(vertx);
+
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_21);
+
+        String namespace = "ns";
+        String connectorName = "my-connector-4";
+
+        LinkedHashMap<String, Object> config = new LinkedHashMap<>();
+        config.put(TestingConnector.FAIL_ON_START, true);
+        config.put(TestingConnector.START_TIME_MS, 0);
+        config.put(TestingConnector.STOP_TIME_MS, 0);
+        config.put(TestingConnector.TASK_START_TIME_MS, 0);
+        config.put(TestingConnector.TASK_STOP_TIME_MS, 0);
+        config.put(TestingConnector.TASK_POLL_TIME_MS, 0);
+        config.put(TestingConnector.TASK_POLL_RECORDS, 100);
+        config.put(TestingConnector.NUM_PARTITIONS, 1);
+        config.put(TestingConnector.TOPIC_NAME, "my-topic");
+
+        KafkaConnector connector = createKafkaConnector(namespace, connectorName, true, config);
+        Crds.kafkaConnectorOperation(client).inNamespace(namespace).resource(connector).create();
+
+        MetricsProvider metrics = new MicrometerMetricsProvider();
+        ResourceOperatorSupplier ros = new ResourceOperatorSupplier(vertx, client,
+            new ZookeeperLeaderFinder(vertx,
+                // Retry up to 3 times (4 attempts), with overall max delay of 35000ms
+                () -> new BackOff(5_000, 2, 4)),
+            new DefaultAdminClientProvider(),
+            new DefaultZookeeperScalerProvider(),
+            metrics,
+            pfa, 10_000
+        );
+
+        KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
+            ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
+            connect -> new KafkaConnectApiImpl(vertx),
+            connectCluster.getPort(2)
+        ) { };
+
+        operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
+                "localhost", connectClient, true, connectorName,
+                connector)
+            .onComplete(context.succeeding(v -> {
+                assertConnectorIsAutoRestarted(context, client, namespace, connectorName);
+                context.completeNow();
+            }));
+    }
+
+    @Test
+    public void testTaskIsAutoRestarted(VertxTestContext context) {
+        KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl(vertx);
+
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_21);
+
+        String namespace = "ns";
+        String connectorName = "my-connector-5";
+
+        LinkedHashMap<String, Object> config = new LinkedHashMap<>();
+        config.put(TestingConnector.TASK_FAIL_ON_START, true);
+        config.put(TestingConnector.START_TIME_MS, 0);
+        config.put(TestingConnector.STOP_TIME_MS, 0);
+        config.put(TestingConnector.TASK_START_TIME_MS, 0);
+        config.put(TestingConnector.TASK_STOP_TIME_MS, 0);
+        config.put(TestingConnector.TASK_POLL_TIME_MS, 0);
+        config.put(TestingConnector.TASK_POLL_RECORDS, 100);
+        config.put(TestingConnector.NUM_PARTITIONS, 1);
+        config.put(TestingConnector.TOPIC_NAME, "my-topic");
+
+        KafkaConnector connector = createKafkaConnector(namespace, connectorName, true, config);
+        Crds.kafkaConnectorOperation(client).inNamespace(namespace).resource(connector).create();
+
+        MetricsProvider metrics = new MicrometerMetricsProvider();
+        ResourceOperatorSupplier ros = new ResourceOperatorSupplier(vertx, client,
+            new ZookeeperLeaderFinder(vertx,
+                // Retry up to 3 times (4 attempts), with overall max delay of 35000ms
+                () -> new BackOff(5_000, 2, 4)),
+            new DefaultAdminClientProvider(),
+            new DefaultZookeeperScalerProvider(),
+            metrics,
+            pfa, 10_000
+        );
+
+        KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
+            ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
+            connect -> new KafkaConnectApiImpl(vertx),
+            connectCluster.getPort(2)
+        ) { };
+
+        operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
+                "localhost", connectClient, true, connectorName,
+                connector)
+            .compose(v -> {
+                // Sometimes task status doesn't appear on first reconcile if tasks haven't started yet
+                if (taskStatusIsPresent(client, namespace, connectorName)) {
+                    return Future.succeededFuture();
+                } else {
+                    Promise<Void> promise = Promise.promise();
+                    vertx.setTimer(2000, id -> operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
+                            "localhost", connectClient, true, connectorName, connector)
+                        .onComplete(result -> promise.complete(result.result())));
+                    return promise.future();
+                }
+            })
+            .onComplete(context.succeeding(v -> {
+                assertTaskIsAutoRestarted(context, client, namespace, connectorName);
+                context.completeNow();
+            }));
+    }
+
+    private KafkaConnector createKafkaConnector(String namespace, String connectorName, boolean enableAutoRestart, LinkedHashMap<String, Object> config) {
         return new KafkaConnectorBuilder()
                     .withNewMetadata()
                         .withName(connectorName)
@@ -290,6 +414,9 @@ public class KafkaConnectorIT {
                         .withClassName(TestingConnector.class.getName())
                         .withTasksMax(1)
                         .withConfig(config)
+                        .withNewAutoRestart()
+                            .withEnabled(enableAutoRestart)
+                            .endAutoRestart()
                     .endSpec()
                     .build();
     }
@@ -325,6 +452,16 @@ public class KafkaConnectorIT {
         });
     }
 
+    private boolean taskStatusIsPresent(KubernetesClient client, String namespace, String connectorName) {
+        KafkaConnector kafkaConnector = Crds.kafkaConnectorOperation(client).inNamespace(namespace).withName(connectorName).get();
+        Map<String, Object> connectorStatus = Optional.ofNullable(kafkaConnector)
+                .map(KafkaConnector::getStatus)
+                .map(KafkaConnectorStatus::getConnectorStatus)
+                .orElseGet(HashMap::new);
+        Object tasks = connectorStatus.get("tasks");
+        return tasks instanceof ArrayList && ((ArrayList<?>) tasks).size() > 0;
+    }
+
     private void assertConnectorTaskIsNotReady(VertxTestContext context, KubernetesClient client, String namespace, String connectorName) {
         context.verify(() -> {
             KafkaConnector kafkaConnector = Crds.kafkaConnectorOperation(client).inNamespace(namespace).withName(connectorName).get();
@@ -343,6 +480,45 @@ public class KafkaConnectorIT {
             assertThat(notReadyCondition, hasProperty("status", equalTo("True")));
             assertThat(notReadyCondition, hasProperty("reason", equalTo("Throwable")));
             assertThat(notReadyCondition, hasProperty("message", equalTo("The following tasks have failed: 0, see connectorStatus for more details.")));
+        });
+    }
+
+    private void assertConnectorIsAutoRestarted(VertxTestContext context, KubernetesClient client, String namespace, String connectorName) {
+        context.verify(() -> {
+            KafkaConnector kafkaConnector = Crds.kafkaConnectorOperation(client).inNamespace(namespace)
+                .withName(connectorName).get();
+            assertThat(kafkaConnector, notNullValue());
+            assertThat(kafkaConnector.getStatus(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getConnectorStatus(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getAutoRestart(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getAutoRestart().getCount(), is(1));
+            JsonObject connectorStatus = new JsonObject(kafkaConnector.getStatus().getConnectorStatus());
+            assertThat(connectorStatus.getJsonObject("connector"), notNullValue());
+            assertThat(connectorStatus.getJsonObject("connector").getString("state"), is("RESTARTING"));
+            MetricsProvider metrics = new MicrometerMetricsProvider();
+            MeterRegistry registry = metrics.meterRegistry();
+            assertThat(registry.get(AbstractOperator.METRICS_PREFIX + "auto.restarts").tag("kind", KafkaConnector.RESOURCE_KIND).counter().count(), CoreMatchers.is(1.0));
+        });
+    }
+
+    private void assertTaskIsAutoRestarted(VertxTestContext context, KubernetesClient client, String namespace, String connectorName) {
+        context.verify(() -> {
+            KafkaConnector kafkaConnector = Crds.kafkaConnectorOperation(client).inNamespace(namespace)
+                .withName(connectorName).get();
+            assertThat(kafkaConnector, notNullValue());
+            assertThat(kafkaConnector.getStatus(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getConnectorStatus(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getAutoRestart(), notNullValue());
+            assertThat(kafkaConnector.getStatus().getAutoRestart().getCount(), is(1));
+            JsonObject connectorStatus = new JsonObject(kafkaConnector.getStatus().getConnectorStatus());
+            assertThat(connectorStatus.getJsonObject("connector"), notNullValue());
+            assertThat(connectorStatus.getJsonObject("connector").getString("state"), is("RUNNING"));
+            assertThat(connectorStatus.getJsonArray("tasks"), notNullValue());
+            assertThat(connectorStatus.getJsonArray("tasks").size(), is(1));
+            assertThat(connectorStatus.getJsonArray("tasks").getJsonObject(0).getString("state"), is("RESTARTING"));
+            MetricsProvider metrics = new MicrometerMetricsProvider();
+            MeterRegistry registry = metrics.meterRegistry();
+            assertThat(registry.get(AbstractOperator.METRICS_PREFIX + "auto.restarts").tag("kind", KafkaConnector.RESOURCE_KIND).counter().count(), CoreMatchers.is(1.0));
         });
     }
 }

@@ -32,11 +32,12 @@ public class ListenersUtils {
      * Finds out if any of the listeners has OAuth authentication enabled
      *
      * @param listeners List of all listeners
-     * @return          List of used names
+     *
+     * @return          True if any listener in the list is using OAuth authentication. False otherwise.
      */
     public static boolean hasListenerWithOAuth(List<GenericKafkaListener> listeners)    {
         return listeners.stream()
-                .anyMatch(listener -> isListenerWithOAuth(listener));
+                .anyMatch(ListenersUtils::isListenerWithOAuth);
     }
 
     /**
@@ -91,12 +92,12 @@ public class ListenersUtils {
     }
 
     /**
-     * Returns list of all external listeners (i.e. not internal)
+     * Returns list of all listeners which use their own services (i.e. all apart from type=internal)
      *
      * @param listeners List of all listeners
-     * @return          List of external listeners
+     * @return          List of listeners with their own services
      */
-    public static List<GenericKafkaListener> externalListeners(List<GenericKafkaListener> listeners)    {
+    public static List<GenericKafkaListener> listenersWithOwnServices(List<GenericKafkaListener> listeners)    {
         return listeners.stream()
                 .filter(listener -> KafkaListenerType.INTERNAL != listener.getType())
                 .collect(Collectors.toList());
@@ -143,6 +144,16 @@ public class ListenersUtils {
     }
 
     /**
+     * Returns list of all Ingress type listeners
+     *
+     * @param listeners List of all listeners
+     * @return          List of clusterIP listeners
+     */
+    public static List<GenericKafkaListener> clusterIPListeners(List<GenericKafkaListener> listeners)    {
+        return listenersByType(listeners, KafkaListenerType.CLUSTER_IP);
+    }
+
+    /**
      * Returns true if the list has a listener of given type and false otherwise.
      *
      * @param listeners List of all listeners
@@ -151,40 +162,7 @@ public class ListenersUtils {
      */
     private static boolean hasListenerOfType(List<GenericKafkaListener> listeners, KafkaListenerType type)    {
         return listeners.stream()
-                .filter(listener -> type == listener.getType())
-                .findFirst()
-                .isPresent();
-    }
-
-    /**
-     * Check whether we have at least one interface for access from outside of Kubernetes
-     *
-     * @param listeners List of all listeners
-     * @return          List of external listeners
-     */
-    public static boolean hasExternalListener(List<GenericKafkaListener> listeners)    {
-        return listeners.stream()
-                .anyMatch(listener -> KafkaListenerType.INTERNAL != listener.getType());
-    }
-
-    /**
-     * Checks whether we have at least one Route listener
-     *
-     * @param listeners List of all listeners
-     * @return          True if at least one Route listener exists. False otherwise.
-     */
-    public static boolean hasRouteListener(List<GenericKafkaListener> listeners)    {
-        return hasListenerOfType(listeners, KafkaListenerType.ROUTE);
-    }
-
-    /**
-     * Checks whether we have at least one Load Balancer listener
-     *
-     * @param listeners List of all listeners
-     * @return          True if at least one Load Balancer listener exists. False otherwise.
-     */
-    public static boolean hasLoadBalancerListener(List<GenericKafkaListener> listeners)    {
-        return hasListenerOfType(listeners, KafkaListenerType.LOADBALANCER);
+                .anyMatch(listener -> type == listener.getType());
     }
 
     /**
@@ -205,6 +183,16 @@ public class ListenersUtils {
      */
     public static boolean hasIngressListener(List<GenericKafkaListener> listeners)    {
         return hasListenerOfType(listeners, KafkaListenerType.INGRESS);
+    }
+
+    /**
+     * Checks whether we have at least one ClusterIP listener
+     *
+     * @param listeners List of all listeners
+     * @return          True if at least one ClusterIP listener exists. False otherwise.
+     */
+    public static boolean hasClusterIPListener(List<GenericKafkaListener> listeners)    {
+        return hasListenerOfType(listeners, KafkaListenerType.CLUSTER_IP);
     }
 
     /**
@@ -309,22 +297,23 @@ public class ListenersUtils {
      * @throws  UnsupportedOperationException Throws UnsupportedOperationException if called for internal service
      *                                          which does not have per-pod services
      *
-     * @param clusterName Name of the cluster to which this service belongs
-     * @param pod         Number of the pod for which this service will be used
+     * @param baseName  The base name which should be used to generate the Service name - for example my-cluster-kafka
+     * @param pod       Number of the pod for which this service will be used
      * @param listener  Listener for which the name should be generated
+     *
      * @return          Name of the bootstrap service
      */
-    public static String backwardsCompatibleBrokerServiceName(String clusterName, int pod, GenericKafkaListener listener) {
+    public static String backwardsCompatiblePerBrokerServiceName(String baseName, int pod, GenericKafkaListener listener) {
         if (listener.getPort() == 9092 && "plain".equals(listener.getName()) && KafkaListenerType.INTERNAL == listener.getType())   {
             throw new UnsupportedOperationException("Per-broker services are not used for internal listener");
         } else if (listener.getPort() == 9093 && "tls".equals(listener.getName()) && KafkaListenerType.INTERNAL == listener.getType())   {
             throw new UnsupportedOperationException("Per-broker services are not used for internal listener");
         } else if (listener.getPort() == 9094 && "external".equals(listener.getName()))   {
-            return clusterName + "-kafka-" + pod;
+            return baseName + "-" + pod;
         } else if (KafkaListenerType.INTERNAL == listener.getType()) {
             throw new UnsupportedOperationException("Per-broker services are not used for internal listener");
         } else {
-            return clusterName + "-kafka-" + listener.getName() + "-" + pod;
+            return baseName + "-" + listener.getName() + "-" + pod;
         }
     }
 
@@ -642,14 +631,14 @@ public class ListenersUtils {
     }
 
     /**
-     * Finds ingress class
+     * Finds controller class which mean ingress class or loadbalancer class
      *
-     * @param listener  Listener for which the ingress class should be found
-     * @return          Ingress class or null if not specified
+     * @param listener  Listener for which the controller class should be found
+     * @return          Controller class or null if not specified
      */
-    public static String ingressClass(GenericKafkaListener listener)    {
+    public static String controllerClass(GenericKafkaListener listener)    {
         if (listener.getConfiguration() != null) {
-            return listener.getConfiguration().getIngressClass();
+            return listener.getConfiguration().getControllerClass();
         } else {
             return null;
         }
@@ -670,5 +659,44 @@ public class ListenersUtils {
         } else {
             return "ClusterIP";
         }
+    }
+
+
+    /**
+     * Returns the advertised host for given broker. If user specified some override in the listener configuration, it
+     * will return this override. If no override is specified, it will return the host obtained from Kubernetes
+     * passes as parameter to this method.
+     *
+     * @param listener  Listener where the configuration should be found
+     * @param nodeId    Kafka node ID
+     * @param hostname  The advertised hostname which will be used if there is no listener override
+     *
+     * @return  The advertised hostname
+     */
+    public static String advertisedHostnameFromOverrideOrParameter(GenericKafkaListener listener, int nodeId, String hostname) {
+        String advertisedHost = ListenersUtils.brokerAdvertisedHost(listener, nodeId);
+
+        if (advertisedHost == null && hostname == null)  {
+            return null;
+        }
+
+        return advertisedHost != null ? advertisedHost : hostname;
+    }
+
+    /**
+     * Returns the advertised port for given broker. If user specified some override in the listener configuration, it
+     * will return this override. If no override is specified, it will return the port obtained from Kubernetes
+     * passes as parameter to this method.
+     *
+     * @param listener  Listener where the configuration should be found
+     * @param nodeId    Kafka node ID
+     * @param port      The advertised port
+     *
+     * @return  The advertised port as String
+     */
+    public static String advertisedPortFromOverrideOrParameter(GenericKafkaListener listener, int nodeId, Integer port) {
+        Integer advertisedPort = ListenersUtils.brokerAdvertisedPort(listener, nodeId);
+
+        return String.valueOf(advertisedPort != null ? advertisedPort : port);
     }
 }

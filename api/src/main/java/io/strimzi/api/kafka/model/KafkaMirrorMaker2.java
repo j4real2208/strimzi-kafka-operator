@@ -9,7 +9,6 @@ import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.fabric8.kubernetes.api.model.Namespaced;
 import io.fabric8.kubernetes.client.CustomResource;
 import io.fabric8.kubernetes.model.annotation.Group;
@@ -52,7 +51,7 @@ import java.util.function.Predicate;
         additionalPrinterColumns = {
             @Crd.Spec.AdditionalPrinterColumn(
                 name = "Desired replicas",
-                description = "The desired number of Kafka MirrorMaker 2.0 replicas",
+                description = "The desired number of Kafka MirrorMaker 2 replicas",
                 jsonPath = ".spec.replicas",
                 type = "integer"),
             @Crd.Spec.AdditionalPrinterColumn(
@@ -67,14 +66,13 @@ import java.util.function.Predicate;
         editableEnabled = false,
         generateBuilderPackage = false,
         builderPackage = Constants.FABRIC8_KUBERNETES_API,
-        refs = {@BuildableReference(CustomResource.class)}
+        refs = {@BuildableReference(CustomResource.class), @BuildableReference(io.fabric8.kubernetes.api.model.ObjectMeta.class)}
 )
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({ "apiVersion", "kind", "metadata", "spec", "status" })
 @EqualsAndHashCode
 @Version(Constants.V1BETA2)
 @Group(Constants.RESOURCE_GROUP_NAME)
-@SuppressFBWarnings("RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE")
 public class KafkaMirrorMaker2 extends CustomResource<KafkaMirrorMaker2Spec, KafkaMirrorMaker2Status> implements Namespaced, UnknownPropertyPreserving {
     private static final long serialVersionUID = 1L;
 
@@ -112,13 +110,13 @@ public class KafkaMirrorMaker2 extends CustomResource<KafkaMirrorMaker2Spec, Kaf
     }
 
     @Override
-    @Description("The specification of the Kafka MirrorMaker 2.0 cluster.")
+    @Description("The specification of the Kafka MirrorMaker 2 cluster.")
     public KafkaMirrorMaker2Spec getSpec() {
         return super.getSpec();
     }
 
     @Override
-    @Description("The status of the Kafka MirrorMaker 2.0 cluster.")
+    @Description("The status of the Kafka MirrorMaker 2 cluster.")
     public KafkaMirrorMaker2Status getStatus() {
         return super.getStatus();
     }

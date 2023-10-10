@@ -16,7 +16,7 @@ BASE_FQDN=$(hostname -f | cut -d "." -f2-4)
 export BASE_FQDN
 
 # Detect the server ID based on the hostname.
-# StatefulSets are numbered from 0 so we have to always increment by 1
+# Pods are numbered from 0 so we have to always increment by 1
 ZOOKEEPER_ID=$(hostname | awk -F'-' '{print $NF+1}')
 export ZOOKEEPER_ID
 echo "Detected Zookeeper ID $ZOOKEEPER_ID"
@@ -55,7 +55,7 @@ if [ "$ZOOKEEPER_METRICS_ENABLED" = "true" ]; then
   export KAFKA_OPTS
 fi
 
-. ./set_kafka_jmx_options.sh "${ZOOKEEPER_JMX_ENABLED}" "${ZOOKEEPER_JMX_USERNAME}" "${ZOOKEEPER_JMX_PASSWORD}"
+. ./set_kafka_jmx_options.sh "${STRIMZI_JMX_ENABLED}" "${STRIMZI_JMX_USERNAME}" "${STRIMZI_JMX_PASSWORD}"
 
 # Configure heap based on the available resources if needed
 . ./dynamic_resources.sh

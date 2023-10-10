@@ -12,6 +12,7 @@ import io.strimzi.api.kafka.KafkaTopicList;
 import io.strimzi.api.kafka.model.KafkaTopic;
 import io.strimzi.api.kafka.model.KafkaTopicBuilder;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.junit5.Checkpoint;
 import io.vertx.junit5.VertxExtension;
 import io.vertx.junit5.VertxTestContext;
@@ -33,14 +34,17 @@ import static org.mockito.Mockito.when;
 public class K8sImplTest {
 
     private static Vertx vertx;
+    private static WorkerExecutor sharedWorkerExecutor;
 
     @BeforeAll
     public static void before() {
         vertx = Vertx.vertx();
+        sharedWorkerExecutor = vertx.createSharedWorkerExecutor("kubernetes-ops-pool");
     }
 
     @AfterAll
     public static void after() {
+        sharedWorkerExecutor.close();
         vertx.close();
     }
 
@@ -60,7 +64,7 @@ public class K8sImplTest {
         when(mockClient.resources(any(Class.class), any(Class.class))).thenReturn(mockResources);
         when(mockResources.withLabels(any())).thenReturn(mockResources);
         when(mockResources.inNamespace(any())).thenReturn(mockResources);
-        when(mockResources.list()).thenAnswer(invocation -> {
+        when(mockResources.list(any())).thenAnswer(invocation -> {
             KafkaTopicList ktl = new KafkaTopicList();
             ktl.setItems(mockKafkaTopicsList);
             return ktl;

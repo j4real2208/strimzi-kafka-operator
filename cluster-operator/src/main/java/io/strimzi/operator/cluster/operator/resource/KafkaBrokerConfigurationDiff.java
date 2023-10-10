@@ -22,7 +22,7 @@ import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.model.OrderedProperties;
-import io.strimzi.operator.common.operator.resource.AbstractJsonDiff;
+import io.strimzi.operator.common.model.AbstractJsonDiff;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
@@ -65,7 +65,16 @@ public class KafkaBrokerConfigurationDiff extends AbstractJsonDiff {
             + "|zookeeper\\.clientCnxnSocket"
             + "|broker\\.rack)$");
 
-    public KafkaBrokerConfigurationDiff(Reconciliation reconciliation, Config brokerConfigs, String desired, KafkaVersion kafkaVersion, int brokerId) {
+    /**
+     * Constructor
+     *
+     * @param reconciliation    Reconciliation marker
+     * @param brokerConfigs     Broker configuration from Kafka Admin API
+     * @param desired           Desired configuration
+     * @param kafkaVersion      Kafka version
+     * @param brokerId          Broker ID
+     */
+    protected KafkaBrokerConfigurationDiff(Reconciliation reconciliation, Config brokerConfigs, String desired, KafkaVersion kafkaVersion, int brokerId) {
         this.reconciliation = reconciliation;
         this.configModel = KafkaConfiguration.readConfigModel(kafkaVersion);
         this.diff = diff(brokerId, desired, brokerConfigs, configModel);
@@ -78,7 +87,10 @@ public class KafkaBrokerConfigurationDiff extends AbstractJsonDiff {
         });
     }
 
-    public boolean canBeUpdatedDynamically() {
+    /**
+     * @return  Returns true if the configuration can be updated dynamically
+     */
+    protected boolean canBeUpdatedDynamically() {
         boolean result = true;
         for (AlterConfigOp entry : diff) {
             if (isEntryReadOnly(entry.configEntry())) {
@@ -102,14 +114,14 @@ public class KafkaBrokerConfigurationDiff extends AbstractJsonDiff {
      * Returns configuration difference
      * @return Collection of AlterConfigOp containing difference between current and desired configuration
      */
-    public Collection<AlterConfigOp> getConfigDiff() {
+    protected Collection<AlterConfigOp> getConfigDiff() {
         return diff;
     }
 
     /**
      * @return The number of broker configs which are different.
      */
-    public int getDiffSize() {
+    protected int getDiffSize() {
         return diff.size();
     }
 

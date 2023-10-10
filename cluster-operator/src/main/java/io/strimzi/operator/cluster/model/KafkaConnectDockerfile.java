@@ -35,25 +35,16 @@ public class KafkaConnectDockerfile {
     private static final String ROOT_USER = "root:root";
     private static final String NON_PRIVILEGED_USER = "1001";
 
-    private static final String ENV_VAR_HTTP_PROXY = "HTTP_PROXY";
-    private static final String ENV_VAR_HTTPS_PROXY = "HTTPS_PROXY";
-    private static final String ENV_VAR_NO_PROXY = "NO_PROXY";
-
-    private static final String HTTP_PROXY = System.getenv(ClusterOperatorConfig.HTTP_PROXY);
-    private static final String HTTPS_PROXY = System.getenv(ClusterOperatorConfig.HTTPS_PROXY);
-    private static final String NO_PROXY = System.getenv(ClusterOperatorConfig.NO_PROXY);
-
     private final String dockerfile;
 
     private static final String DEFAULT_MAVEN_IMAGE = "quay.io/strimzi/maven-builder:latest";
     private final String mavenBuilder;
 
-    public static Cmd run(String cmd, String... args) {
+    private static Cmd run(String cmd, String... args) {
         return new Cmd(new StringBuilder(), cmd, args);
     }
 
-    public static class Cmd {
-
+    private static class Cmd {
         private final StringBuilder stringBuilder;
         boolean doneFirst = false;
 
@@ -118,8 +109,11 @@ public class KafkaConnectDockerfile {
      *
      * @param fromImage     Image which should be used as a base image in the FROM statement
      * @param connectBuild  The Build definition from the API
+     * @param sharedEnvironmentProvider  sharedEnvironmentProvider instance
      */
-    public KafkaConnectDockerfile(String fromImage, Build connectBuild) {
+    public KafkaConnectDockerfile(String fromImage,
+                                  Build connectBuild,
+                                  SharedEnvironmentProvider sharedEnvironmentProvider) {
         this.mavenBuilder = System.getenv().getOrDefault(ClusterOperatorConfig.STRIMZI_DEFAULT_MAVEN_BUILDER, DEFAULT_MAVEN_IMAGE);
         StringWriter stringWriter = new StringWriter();
         PrintWriter writer = new PrintWriter(stringWriter);
@@ -128,7 +122,7 @@ public class KafkaConnectDockerfile {
         connectorPluginsPreStage(writer, connectBuild.getPlugins());
         from(writer, fromImage); // Create FROM statement
         user(writer, ROOT_USER); // Switch to root user to be able to add plugins
-        proxy(writer); // Configures proxy environment variables
+        proxy(writer, sharedEnvironmentProvider); // Configures proxy environment variables
         connectorPlugins(writer, connectBuild.getPlugins());
         user(writer, NON_PRIVILEGED_USER); // Switch back to the regular unprivileged user
 
@@ -143,28 +137,48 @@ public class KafkaConnectDockerfile {
      * @param plugins       List of plugins which should be added to the container image
      */
     private void connectorPluginsPreStage(PrintWriter writer, List<Plugin> plugins) {
-        Map<String, List<MavenArtifact>> artifactMap = plugins.stream().collect(Collectors.toMap(plugin -> plugin.getName(),
+        Map<String, List<MavenArtifact>> artifactMap = plugins.stream().collect(Collectors.toMap(Plugin::getName,
             plugin -> plugin.getArtifacts().stream().filter(artifact -> artifact instanceof MavenArtifact).map(artifact -> (MavenArtifact) artifact).collect(Collectors.toList())));
         artifactMap.entrySet().removeIf(plugin -> plugin.getValue().isEmpty());
 
         if (artifactMap.size() > 0) {
             writer.println("FROM " + mavenBuilder + " AS downloadArtifacts");
-            artifactMap.entrySet().forEach(plugin -> {
-                plugin.getValue().forEach(mvn -> {
+            artifactMap.forEach((plugin, mvnList) ->
+                mvnList.forEach(mvn -> {
                     String repo = mvn.getRepository() == null ? MavenArtifact.DEFAULT_REPOSITORY : maybeAppendSlash(mvn.getRepository());
                     String artifactHash = Util.hashStub(mvn.getGroup() + "/" + mvn.getArtifact() + "/" + mvn.getVersion());
-                    String artifactDir = plugin.getKey() + "/" + artifactHash;
+                    String artifactDir = plugin + "/" + artifactHash;
 
-                    Cmd cmd = run("curl", "-f", "-L", "--create-dirs", "--output", "/tmp/" + artifactDir + "/pom.xml", assembleResourceUrl(repo, mvn, "pom"))
-                            .andRun("mvn", "dependency:copy-dependencies",
-                                    "-DoutputDirectory=/tmp/artifacts/" + artifactDir, "-f", "/tmp/" + artifactDir + "/pom.xml")
-                            .andRun("curl", "-f", "-L", "--create-dirs", "--output",
-                                    "/tmp/artifacts/" + artifactDir + "/" + mvn.getArtifact() + "-" + mvn.getVersion() + ".jar",
-                                    assembleResourceUrl(repo, mvn, "jar"));
+                    // For handling custom repositories, we need to write custom Maven settings file
+                    String settingsFile = "/tmp/" + artifactHash + ".xml";
+                    String settingsXml = "<settings xmlns=\"http://maven.apache.org/SETTINGS/1.0.0\"><profiles><profile><id>download</id><repositories><repository><id>custom-repo</id><url>" + escapeXml(repo) + "</url></repository></repositories></profile></profiles><activeProfiles><activeProfile>download</activeProfile></activeProfiles></settings>";
+
+                    Cmd cmd;
+                    if (Boolean.TRUE.equals(mvn.getInsecure()))    {
+                        // Insecure download => disables TLS certificate checks in curl and Maven commands
+                        cmd = run("curl", "-f", "-k", "-L", "--create-dirs", "--output", "/tmp/" + artifactDir + "/pom.xml", assembleResourceUrl(repo, mvn, "pom"))
+                                .andRun("echo", settingsXml).redirectTo(settingsFile) // Create the settings file
+                                .andRun("mvn", "dependency:copy-dependencies", "-s", settingsFile,
+                                        "-DoutputDirectory=/tmp/artifacts/" + artifactDir, "-Daether.connector.https.securityMode=insecure",
+                                        "-Dmaven.wagon.http.ssl.insecure=true", "-Dmaven.wagon.http.ssl.allowall=true",
+                                        "-Dmaven.wagon.http.ssl.ignore.validity.dates=true", "-f", "/tmp/" + artifactDir + "/pom.xml")
+                                .andRun("curl", "-f", "-k", "-L", "--create-dirs", "--output",
+                                        "/tmp/artifacts/" + artifactDir + "/" + mvn.getArtifact() + "-" + mvn.getVersion() + ".jar",
+                                        assembleResourceUrl(repo, mvn, "jar"));
+                    } else {
+                        cmd = run("curl", "-f", "-L", "--create-dirs", "--output", "/tmp/" + artifactDir + "/pom.xml", assembleResourceUrl(repo, mvn, "pom"))
+                                .andRun("echo", settingsXml).redirectTo(settingsFile) // Create the settings file
+                                .andRun("mvn", "dependency:copy-dependencies", "-s", settingsFile,
+                                        "-DoutputDirectory=/tmp/artifacts/" + artifactDir, "-f", "/tmp/" + artifactDir + "/pom.xml")
+                                .andRun("curl", "-f", "-L", "--create-dirs", "--output",
+                                        "/tmp/artifacts/" + artifactDir + "/" + mvn.getArtifact() + "-" + mvn.getVersion() + ".jar",
+                                        assembleResourceUrl(repo, mvn, "jar"));
+                    }
+                    
                     writer.append("RUN ").println(cmd);
                     writer.println();
-                });
-            });
+                })
+            );
         }
     }
 
@@ -194,20 +208,24 @@ public class KafkaConnectDockerfile {
      * Generates proxy arguments if set in the operator
      *
      * @param writer        Writer for printing the Docker commands
+     * @param sharedEnvironmentProvider  sharedEnvironmentProvider instance
      */
-    private void proxy(PrintWriter writer) {
-        if (HTTP_PROXY != null) {
-            writer.println(String.format("ARG %s=%s", ENV_VAR_HTTP_PROXY.toLowerCase(Locale.ENGLISH), HTTP_PROXY));
+    private void proxy(PrintWriter writer, SharedEnvironmentProvider sharedEnvironmentProvider) {
+        String httpProxyValue = sharedEnvironmentProvider.value(ClusterOperatorConfig.HTTP_PROXY);
+        if (httpProxyValue != null) {
+            writer.println(String.format("ARG %s=%s", ClusterOperatorConfig.HTTP_PROXY.toLowerCase(Locale.ENGLISH), httpProxyValue));
             writer.println();
         }
 
-        if (HTTPS_PROXY != null) {
-            writer.println(String.format("ARG %s=%s", ENV_VAR_HTTPS_PROXY.toLowerCase(Locale.ENGLISH), HTTPS_PROXY));
+        String httpsProxyValue = sharedEnvironmentProvider.value(ClusterOperatorConfig.HTTPS_PROXY);
+        if (httpsProxyValue != null) {
+            writer.println(String.format("ARG %s=%s", ClusterOperatorConfig.HTTPS_PROXY.toLowerCase(Locale.ENGLISH), httpsProxyValue));
             writer.println();
         }
 
-        if (NO_PROXY != null) {
-            writer.println(String.format("ARG %s=%s", ENV_VAR_NO_PROXY.toLowerCase(Locale.ENGLISH), NO_PROXY));
+        String noProxyValue = sharedEnvironmentProvider.value(ClusterOperatorConfig.NO_PROXY);
+        if (noProxyValue != null) {
+            writer.println(String.format("ARG %s=%s", ClusterOperatorConfig.NO_PROXY.toLowerCase(Locale.ENGLISH), noProxyValue));
             writer.println();
         }
     }
@@ -477,5 +495,44 @@ public class KafkaConnectDockerfile {
         return Util.hashStub(dockerfile);
     }
 
+    /**
+     * This method escapes some of the basic XML characters. This is used when generating the Maven settings XML file.
+     * This method is not perfect - but for this use case it seems as an easier solution then including something like
+     * Apache Commons as a dependency.
+     *
+     * @param text  The text which should be escaped
+     *
+     * @return  Escaped text
+     */
+    private static String escapeXml(String text)   {
+        StringBuilder sb = new StringBuilder();
 
+        text.codePoints().forEach(c -> {
+            switch (c) {
+                case '<':
+                    sb.append("&lt;");
+                    break;
+                case '>':
+                    sb.append("&gt;");
+                    break;
+                case '&':
+                    sb.append("&amp;");
+                    break;
+                case '\"':
+                    sb.append("&quot;");
+                    break;
+                case '\'':
+                    sb.append("&apos;");
+                    break;
+                default:
+                    if (c > 0x7e) {
+                        sb.append("&#").append(c).append(";");
+                    } else {
+                        sb.append(Character.toChars(c));
+                    }
+            }
+        });
+
+        return sb.toString();
+    }
 }

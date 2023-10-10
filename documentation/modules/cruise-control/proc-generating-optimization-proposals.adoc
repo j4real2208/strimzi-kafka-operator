@@ -23,7 +23,9 @@ For more information, see xref:con-optimization-proposals-modes-{context}[Rebala
 .Prerequisites
 
 * You have xref:proc-configuring-deploying-cruise-control-{context}[deployed Cruise Control] to your Strimzi cluster.
-* You have configured xref:con-optimization-goals-{context}[optimization goals] and, optionally, xref:property-cruise-control-broker-capacity-reference[capacity limits on broker resources].
+* You have configured optimization goals and, optionally, capacity limits on broker resources.
+
+For more information on configuring Cruise Control, see xref:proc-configuring-deploying-cruise-control-{context}[].
 
 .Procedure
 
@@ -158,7 +160,7 @@ metadata:
   labels:
     strimzi.io/cluster: my-cluster
   annotations:
-    strimzi.io/rebalance-auto-approval: true
+    strimzi.io/rebalance-auto-approval: "true"
 spec:
   goals:
     - RackAwareGoal
@@ -238,10 +240,7 @@ Although optimization proposals will not reassign replicas of excluded topics, t
 [source,shell,subs="+quotes"]
 ----
 com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException:
-        [CpuCapacityGoal] Insufficient capacity for cpu (Utilization 615.21,
-        Allowed Capacity 420.00, Threshold: 0.70). Add at least 3 brokers with
-        the same cpu capacity (100.00) as broker-0. Add at least 3 brokers with
-        the same cpu capacity (100.00) as broker-0.
+[CpuCapacityGoal] Insufficient capacity for cpu (Utilization 615.21, Allowed Capacity 420.00, Threshold: 0.70). Add at least 3 brokers with the same cpu capacity (100.00) as broker-0. Add at least 3 brokers with the same cpu capacity (100.00) as broker-0.
 ----
 
 [NOTE]

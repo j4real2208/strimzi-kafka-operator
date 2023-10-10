@@ -107,7 +107,7 @@ public class KafkaConnectApiIT {
                 assertThat(fileSource.getVersion(), is(not(emptyString())));
             })))
 
-            .compose(connectorPlugins -> client.list("localhost", port))
+            .compose(connectorPlugins -> client.list(Reconciliation.DUMMY_RECONCILIATION, "localhost", port))
             .onComplete(context.succeeding(connectorNames -> context.verify(() -> assertThat(connectorNames, is(empty())))))
 
             .compose(connectorNames -> {
@@ -118,7 +118,7 @@ public class KafkaConnectApiIT {
                     .put("topic", "my-topic");
                 return client.createOrUpdatePutRequest(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test", o);
             })
-            .onComplete(context.succeedingThenComplete())
+            .onComplete(context.succeeding(i -> { }))
             .compose(created -> {
 
                 Promise<Map<String, Object>> promise = Promise.promise();
@@ -172,17 +172,23 @@ public class KafkaConnectApiIT {
             })))
             .recover(error -> Future.succeededFuture())
 
-            .compose(ignored -> client.pause("localhost", port, "test"))
-            .onComplete(context.succeedingThenComplete())
+            .compose(ignored -> client.pause(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test"))
+            .onComplete(context.succeeding(i -> { }))
 
-            .compose(ignored -> client.resume("localhost", port, "test"))
-            .onComplete(context.succeedingThenComplete())
+            .compose(ignored -> client.resume(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test"))
+            .onComplete(context.succeeding(i -> { }))
 
-            .compose(ignored -> client.restart("localhost", port, "test"))
-            .onComplete(context.succeedingThenComplete())
+            .compose(ignored -> client.stop(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test"))
+            .onComplete(context.succeeding(i -> { }))
+
+            .compose(ignored -> client.resume(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test"))
+            .onComplete(context.succeeding(i -> { }))
+
+            .compose(ignored -> client.restart("localhost", port, "test", true, true))
+            .onComplete(context.succeeding(i -> { }))
 
             .compose(ignored -> client.restartTask("localhost", port, "test", 0))
-            .onComplete(context.succeedingThenComplete())
+            .onComplete(context.succeeding(i -> { }))
 
             .compose(ignored -> {
                 JsonObject o = new JsonObject()
@@ -213,12 +219,12 @@ public class KafkaConnectApiIT {
                         containsString("Invalid value dog for configuration tasks.max: Not a number of type INT"));
             })))
             .recover(e -> Future.succeededFuture())
-            .compose(createResponse -> client.list("localhost", port))
+            .compose(createResponse -> client.list(Reconciliation.DUMMY_RECONCILIATION, "localhost", port))
             .onComplete(context.succeeding(connectorNames -> context.verify(() ->
                     assertThat(connectorNames, is(singletonList("test"))))))
             .compose(connectorNames -> client.delete(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "test"))
-            .onComplete(context.succeedingThenComplete())
-            .compose(deletedConnector -> client.list("localhost", port))
+            .onComplete(context.succeeding(i -> { }))
+            .compose(deletedConnector -> client.list(Reconciliation.DUMMY_RECONCILIATION, "localhost", port))
             .onComplete(context.succeeding(connectorNames -> assertThat(connectorNames, is(empty()))))
             .compose(connectorNames -> client.delete(Reconciliation.DUMMY_RECONCILIATION, "localhost", port, "never-existed"))
             .onComplete(context.failing(error -> {

@@ -4,125 +4,98 @@
  */
 package io.strimzi.systemtest.utils.specific;
 
+import io.fabric8.kubernetes.api.model.LabelSelector;
 import io.strimzi.systemtest.Constants;
-import io.strimzi.test.TestUtils;
-import io.strimzi.test.executor.Exec;
-import io.strimzi.test.executor.ExecResult;
-import io.strimzi.test.k8s.KubeClusterResource;
+import io.strimzi.systemtest.Environment;
+import io.strimzi.systemtest.resources.ResourceManager;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.Level;
+
+import java.util.Map;
 
 import static io.strimzi.test.k8s.KubeClusterResource.cmdKubeClient;
-import static io.strimzi.test.k8s.KubeClusterResource.kubeClient;
 
 public class KeycloakUtils {
 
-    private static final Logger LOGGER = LogManager.getLogger(KeycloakUtils.class);
+    public final static String LATEST_KEYCLOAK_VERSION = "21.0.0";
 
-    public final static String PATH_TO_KEYCLOAK_PREPARE_SCRIPT = "../systemtest/src/test/resources/oauth2/prepare_keycloak_operator.sh";
-    public final static String PATH_TO_KEYCLOAK_TEARDOWN_SCRIPT = "../systemtest/src/test/resources/oauth2/teardown_keycloak_operator.sh";
-
-    public final static String LATEST_KEYCLOAK_VERSION = "15.0.2";
-    public final static String OLD_KEYCLOAK_VERSION = "11.0.1";
-
+    private final static LabelSelector SCRAPER_SELECTOR = new LabelSelector(null, Map.of(Constants.APP_POD_LABEL, Constants.SCRAPER_NAME));
 
     private KeycloakUtils() {}
 
-    public static void deployKeycloak(final String deploymentNamespace, final String watchNamespace) {
-        LOGGER.info("Prepare Keycloak Operator in namespace: {} with watching namespace: {}", deploymentNamespace, watchNamespace);
-
-        // This is needed because from time to time the first try fails on Azure
-        TestUtils.waitFor("Keycloak instance readiness", Constants.KEYCLOAK_DEPLOYMENT_POLL, Constants.KEYCLOAK_DEPLOYMENT_TIMEOUT, () -> {
-            ExecResult result = Exec.exec(Level.INFO, "/bin/bash", PATH_TO_KEYCLOAK_PREPARE_SCRIPT, deploymentNamespace, getValidKeycloakVersion(), watchNamespace);
-
-            if (!result.out().contains("All realms were successfully imported")) {
-                LOGGER.info("Errors occurred during Keycloak install: {}", result.err());
-                return false;
-            }
-            return  true;
-        });
-
-        LOGGER.info("Keycloak in namespace {} is ready", deploymentNamespace);
-    }
-
-    public static void deleteKeycloak(final String deploymentNamespace, final String watchNamespace) {
-        LOGGER.info("Teardown Keycloak Operator in namespace: {} with watching namespace: {}", deploymentNamespace, watchNamespace);
-        Exec.exec(Level.INFO, "/bin/bash", PATH_TO_KEYCLOAK_TEARDOWN_SCRIPT, deploymentNamespace, getValidKeycloakVersion(), watchNamespace);
-    }
-
     /**
      * Returns token from Keycloak API
-     * @param namespaceName
-     * @param baseURI base uri for accessing Keycloak API
-     * @param userName name of user
-     * @param password password of user
+     * @param keycloakNamespace         namespace where keycloak instance is located
+     * @param baseURI                   base uri for accessing Keycloak API
+     * @param userName                  name of user
+     * @param password                  password of user
      * @return user token
      */
-    public static String getToken(String namespaceName, String baseURI, String userName, String password) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+    public static String getToken(String keycloakNamespace, String baseURI, String userName, String password) {
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPods(Environment.TEST_SUITE_NAMESPACE, SCRAPER_SELECTOR).get(0).getMetadata().getName();
+
         return new JsonObject(
-            cmdKubeClient(namespaceName).execInPod(
-                coPodName,
+            cmdKubeClient(keycloakNamespace).execInPod(
+                testSuiteScraperPodName,
                 "curl",
                 "-v",
                 "--insecure",
                 "-X",
                 "POST",
                 "-d", "client_id=admin-cli&client_secret=aGVsbG8td29ybGQtcHJvZHVjZXItc2VjcmV0&grant_type=password&username=" + userName + "&password=" + password,
-                baseURI + "/auth/realms/master/protocol/openid-connect/token"
+                baseURI + "/realms/master/protocol/openid-connect/token"
             ).out()).getString("access_token");
     }
 
     /**
      * Returns specific realm from Keycloak API
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm we want to get
      * @return JsonObject with whole desired realm from Keycloak
      */
     public static JsonObject getKeycloakRealm(String namespaceName, String baseURI, String token, String desiredRealm) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPods(Environment.TEST_SUITE_NAMESPACE, SCRAPER_SELECTOR).get(0).getMetadata().getName();
+
         return new JsonObject(cmdKubeClient(namespaceName).execInPod(
-            coPodName,
+            testSuiteScraperPodName,
             "curl",
             "-v",
             "--insecure",
             "-X",
             "GET",
-            baseURI + "/auth/admin/realms/" + desiredRealm,
+            baseURI + "/admin/realms/" + desiredRealm,
             "-H", "Authorization: Bearer " + token
         ).out());
     }
 
     /**
      * Returns all clients for specific realm
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm we want to get clients from
      * @return JsonArray with all clients set for the specific realm
      */
     public static JsonArray getKeycloakRealmClients(String namespaceName, String baseURI, String token, String desiredRealm) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPods(Environment.TEST_SUITE_NAMESPACE, SCRAPER_SELECTOR).get(0).getMetadata().getName();
+
         return new JsonArray(cmdKubeClient(namespaceName).execInPod(
-            coPodName,
+            testSuiteScraperPodName,
             "curl",
             "-v",
             "--insecure",
             "-X",
             "GET",
-            baseURI + "/auth/admin/realms/" + desiredRealm + "/clients",
+            baseURI + "/admin/realms/" + desiredRealm + "/clients",
             "-H", "Authorization: Bearer " + token
         ).out());
     }
 
     /**
      * Returns all policies from client of specific realm
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm we want to get clients from
@@ -135,7 +108,7 @@ public class KeycloakUtils {
 
     /**
      * Returns "resources" for desired endpoint -> policies, resources ...
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm we want to get clients from
@@ -144,22 +117,23 @@ public class KeycloakUtils {
      * @return JsonArray with results from endpoint
      */
     private static JsonArray getConfigFromResourceServerOfRealm(String namespaceName, String baseURI, String token, String desiredRealm, String clientId, String endpoint) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPods(Environment.TEST_SUITE_NAMESPACE, SCRAPER_SELECTOR).get(0).getMetadata().getName();
+
         return new JsonArray(cmdKubeClient(namespaceName).execInPod(
-            coPodName,
+                testSuiteScraperPodName,
             "curl",
             "-v",
             "--insecure",
             "-X",
             "GET",
-            baseURI + "/auth/admin/realms/" + desiredRealm + "/clients/" + clientId + "/authz/resource-server/" + endpoint,
+            baseURI + "/admin/realms/" + desiredRealm + "/clients/" + clientId + "/authz/resource-server/" + endpoint,
             "-H", "Authorization: Bearer " + token
         ).out());
     }
 
     /**
      * Puts new configuration to the specific realm
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm where the config should be put
@@ -167,15 +141,16 @@ public class KeycloakUtils {
      * @return response from server
      */
     public static String putConfigurationToRealm(String namespaceName, String baseURI, String token, JsonObject config, String desiredRealm) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPods(Environment.TEST_SUITE_NAMESPACE, SCRAPER_SELECTOR).get(0).getMetadata().getName();
+
         return cmdKubeClient(namespaceName).execInPod(
-            coPodName,
+                testSuiteScraperPodName,
             "curl",
             "-v",
             "--insecure",
             "-X",
             "PUT",
-            baseURI + "/auth/admin/realms/" + desiredRealm,
+            baseURI + "/admin/realms/" + desiredRealm,
             "-H", "Authorization: Bearer " + token,
             "-d", config.toString(),
             "-H", "Content-Type: application/json"
@@ -184,7 +159,7 @@ public class KeycloakUtils {
 
     /**
      * Updates policies of specific client in realm
-     * @param namespaceName namespace name
+     * @param namespaceName Namespace name
      * @param baseURI base uri for accessing Keycloak API
      * @param token admin token
      * @param desiredRealm realm where the client policies should be updated
@@ -193,26 +168,43 @@ public class KeycloakUtils {
      * @return response from server
      */
     public static String updatePolicyOfRealmClient(String namespaceName, String baseURI, String token, JsonObject policy, String desiredRealm, String clientId) {
-        String coPodName = kubeClient(namespaceName).getClusterOperatorPodName();
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPodsByPrefixInName(Environment.TEST_SUITE_NAMESPACE, Constants.SCRAPER_NAME).get(0).getMetadata().getName();
+
         return cmdKubeClient(namespaceName).execInPod(
-            coPodName,
+            testSuiteScraperPodName,
             "curl",
             "-v",
             "--insecure",
             "-X",
             "PUT",
-            baseURI + "/auth/admin/realms/" + desiredRealm + "/clients/" + clientId + "/authz/resource-server/policy/" + policy.getValue("id"),
+            baseURI + "/admin/realms/" + desiredRealm + "/clients/" + clientId + "/authz/resource-server/policy/" + policy.getValue("id"),
             "-H", "Authorization: Bearer " + token,
             "-d", policy.toString(),
             "-H", "Content-Type: application/json"
         ).out();
     }
 
-    public static String getValidKeycloakVersion() {
-        if (Double.parseDouble(KubeClusterResource.getInstance().client().clusterKubernetesVersion()) >= 1.22) {
-            return LATEST_KEYCLOAK_VERSION;
-        } else {
-            return OLD_KEYCLOAK_VERSION;
-        }
+    /**
+     * Imports Keycloak realm
+     * @param namespaceName Namespace name
+     * @param baseURI base uri for accessing Keycloak API
+     * @param token admin token
+     * @param realmData realm data/configuration in JSON format
+     * @return result of creation
+     */
+    public static String importRealm(String namespaceName, String baseURI, String token, String realmData) {
+        final String testSuiteScraperPodName = ResourceManager.kubeClient().listPodsByPrefixInName(Environment.TEST_SUITE_NAMESPACE, Constants.SCRAPER_NAME).get(0).getMetadata().getName();
+
+        return cmdKubeClient(namespaceName).execInPod(
+                testSuiteScraperPodName,
+                "curl",
+                "--insecure",
+                "-X",
+                "POST",
+                "-H", "Content-Type: application/json",
+                "-d", realmData,
+                baseURI + "/admin/realms",
+                "-H", "Authorization: Bearer " + token
+                ).out().trim();
     }
 }

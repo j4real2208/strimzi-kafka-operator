@@ -8,12 +8,15 @@ import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.ServiceAccountList;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
-import io.fabric8.kubernetes.client.dsl.Resource;
+import io.fabric8.kubernetes.client.dsl.ServiceAccountResource;
 import io.strimzi.operator.common.Reconciliation;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 
-public class ServiceAccountOperator extends AbstractResourceOperator<KubernetesClient, ServiceAccount, ServiceAccountList, Resource<ServiceAccount>> {
+/**
+ * Operator for managing Service Accounts
+ */
+public class ServiceAccountOperator extends AbstractNamespacedResourceOperator<KubernetesClient, ServiceAccount, ServiceAccountList, ServiceAccountResource> {
     /**
      * Constructor
      * @param vertx The Vertx instance
@@ -24,12 +27,12 @@ public class ServiceAccountOperator extends AbstractResourceOperator<KubernetesC
     }
 
     @Override
-    protected MixedOperation<ServiceAccount, ServiceAccountList, Resource<ServiceAccount>> operation() {
+    protected MixedOperation<ServiceAccount, ServiceAccountList, ServiceAccountResource> operation() {
         return client.serviceAccounts();
     }
 
     @Override
-    protected Future<ReconcileResult<ServiceAccount>> internalPatch(Reconciliation reconciliation, String namespace, String name, ServiceAccount current, ServiceAccount desired) {
+    protected Future<ReconcileResult<ServiceAccount>> internalUpdate(Reconciliation reconciliation, String namespace, String name, ServiceAccount current, ServiceAccount desired) {
         if (desired.getSecrets() == null || desired.getSecrets().isEmpty())    {
             desired.setSecrets(current.getSecrets());
         }
@@ -38,6 +41,6 @@ public class ServiceAccountOperator extends AbstractResourceOperator<KubernetesC
             desired.setImagePullSecrets(current.getImagePullSecrets());
         }
 
-        return super.internalPatch(reconciliation, namespace, name, current, desired);
+        return super.internalUpdate(reconciliation, namespace, name, current, desired);
     }
 }

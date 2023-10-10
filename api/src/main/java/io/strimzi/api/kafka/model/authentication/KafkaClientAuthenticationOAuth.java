@@ -8,6 +8,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.strimzi.api.kafka.model.CertSecretSource;
 import io.strimzi.api.kafka.model.Constants;
 import io.strimzi.api.kafka.model.GenericSecretSource;
+import io.strimzi.api.kafka.model.PasswordSecretSource;
 import io.strimzi.crdgenerator.annotations.Description;
 import io.strimzi.crdgenerator.annotations.DescriptionFile;
 import io.sundr.builder.annotations.Buildable;
@@ -31,18 +32,23 @@ public class KafkaClientAuthenticationOAuth extends KafkaClientAuthentication {
     public static final String TYPE_OAUTH = "oauth";
 
     private String clientId;
+    private String username;
     private String scope;
     private String audience;
     private String tokenEndpointUri;
     private Integer connectTimeoutSeconds;
     private Integer readTimeoutSeconds;
+    private Integer httpRetries;
+    private Integer httpRetryPauseMs;
     private GenericSecretSource clientSecret;
+    private PasswordSecretSource passwordSecret;
     private GenericSecretSource accessToken;
     private GenericSecretSource refreshToken;
     private List<CertSecretSource> tlsTrustedCertificates;
     private boolean disableTlsHostnameVerification = false;
     private int maxTokenExpirySeconds = 0;
     private boolean accessTokenIsJwt = true;
+    private boolean enableMetrics = false;
 
     @Description("Must be `" + TYPE_OAUTH + "`")
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -111,6 +117,26 @@ public class KafkaClientAuthenticationOAuth extends KafkaClientAuthentication {
 
     public void setReadTimeoutSeconds(Integer readTimeoutSeconds) {
         this.readTimeoutSeconds = readTimeoutSeconds;
+    }
+
+    @Description("The maximum number of retries to attempt if an initial HTTP request fails. If not set, the default is to not attempt any retries.")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getHttpRetries() {
+        return httpRetries;
+    }
+
+    public void setHttpRetries(Integer httpRetries) {
+        this.httpRetries = httpRetries;
+    }
+
+    @Description("The pause to take before retrying a failed HTTP request. If not set, the default is to not pause at all but to immediately repeat a request.")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getHttpRetryPauseMs() {
+        return httpRetryPauseMs;
+    }
+
+    public void setHttpRetryPauseMs(Integer httpRetryPauseMs) {
+        this.httpRetryPauseMs = httpRetryPauseMs;
     }
 
     @Description("Link to Kubernetes Secret containing the OAuth client secret which the Kafka client can use to authenticate "
@@ -185,5 +211,33 @@ public class KafkaClientAuthenticationOAuth extends KafkaClientAuthentication {
 
     public void setAccessTokenIsJwt(boolean accessTokenIsJwt) {
         this.accessTokenIsJwt = accessTokenIsJwt;
+    }
+
+    @Description("Enable or disable OAuth metrics. Default value is `false`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean isEnableMetrics() {
+        return enableMetrics;
+    }
+
+    public void setEnableMetrics(boolean enableMetrics) {
+        this.enableMetrics = enableMetrics;
+    }
+
+    @Description("Reference to the `Secret` which holds the password.")
+    public PasswordSecretSource getPasswordSecret() {
+        return passwordSecret;
+    }
+
+    public void setPasswordSecret(PasswordSecretSource passwordSecret) {
+        this.passwordSecret = passwordSecret;
+    }
+
+    @Description("Username used for the authentication.")
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
     }
 }

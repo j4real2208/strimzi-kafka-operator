@@ -20,8 +20,6 @@ import io.vertx.junit5.Checkpoint;
 import io.vertx.junit5.VertxTestContext;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -29,7 +27,7 @@ import static org.mockito.ArgumentMatchers.matches;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class KafkaCrdOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, Kafka, KafkaList, Resource<Kafka>> {
+public class KafkaCrdOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, Kafka, KafkaList, Resource<Kafka>> {
 
     @Override
     protected Class<KubernetesClient> clientType() {
@@ -42,11 +40,11 @@ public class KafkaCrdOperatorTest extends AbstractResourceOperatorTest<Kubernete
     }
 
     @Override
-    protected Kafka resource() {
+    protected Kafka resource(String name) {
         return new KafkaBuilder()
                 .withApiVersion(Kafka.RESOURCE_GROUP + "/" + Kafka.V1BETA1)
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                 .endMetadata()
                 .withNewSpec()
@@ -74,8 +72,8 @@ public class KafkaCrdOperatorTest extends AbstractResourceOperatorTest<Kubernete
     }
 
     @Override
-    protected Kafka modifiedResource() {
-        return new KafkaBuilder(resource())
+    protected Kafka modifiedResource(String name) {
+        return new KafkaBuilder(resource(name))
                 .editOrNewSpec()
                     .withNewEntityOperator()
                         .withNewTopicOperator()
@@ -98,7 +96,7 @@ public class KafkaCrdOperatorTest extends AbstractResourceOperatorTest<Kubernete
     }
 
     @Test
-    public void testUpdateStatusAsync(VertxTestContext context) throws IOException {
+    public void testUpdateStatusAsync(VertxTestContext context) {
         Kafka resource = resource();
         Resource mockResource = mock(resourceType());
         when(mockResource.replaceStatus()).thenReturn(resource);

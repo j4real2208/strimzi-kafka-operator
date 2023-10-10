@@ -70,7 +70,7 @@ spec
                 fieldPath: metadata.name
 ----
 +
-For a description of the available environment variables, see xref:ref-operator-cluster-leader-election-{context}[].
+For a description of the available environment variables, see xref:con-configuring-cluster-operator-leader-election-{context}[].
 +
 If you specified a different name or namespace for the `Lease` resource used in leader election, update the RBAC resources.
 
@@ -86,7 +86,7 @@ include::../install/cluster-operator/022-ClusterRole-strimzi-cluster-operator-ro
 # ...      
 ----
 
-. (optional) Edit the the `RoleBinding` resource in the `022-RoleBinding-strimzi-cluster-operator.yaml` file.
+. (optional) Edit the `RoleBinding` resource in the `022-RoleBinding-strimzi-cluster-operator.yaml` file.
 +
 Update `subjects.name` and `subjects.namespace` with the name of the `Lease` resource and the namespace where it was created.
 + 

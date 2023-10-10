@@ -12,7 +12,6 @@ import io.strimzi.api.kafka.model.UnknownPropertyPreserving;
 import io.strimzi.api.kafka.model.status.Condition;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
-import io.strimzi.operator.common.operator.resource.StatusUtils;
 
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Member;
@@ -21,12 +20,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Validation visitor
+ */
 public class ValidationVisitor implements ResourceVisitor.Visitor {
     private final ReconciliationLogger logger;
     private final HasMetadata resource;
     private final Set<Condition> warningConditions;
     private final String transitionTime = StatusUtils.iso8601Now();
 
+    /**
+     * Constructs the validation visitor
+     *
+     * @param resource              Kubernetes resource
+     * @param logger                Reconciliation logger
+     * @param warningConditions     Warning conditions with validation warnings
+     */
     public ValidationVisitor(HasMetadata resource, ReconciliationLogger logger, Set<Condition> warningConditions) {
         this.resource = resource;
         this.logger = logger;
@@ -75,7 +84,10 @@ public class ValidationVisitor implements ResourceVisitor.Visitor {
         DeprecatedProperty deprecated = member.getAnnotation(DeprecatedProperty.class);
         if (deprecated != null
             && isPresent(member, propertyValue)) {
-            String msg = String.format("In API version %s the %s property at path %s has been deprecated",
+            String msg = String.format("In resource %s(%s/%s) in API version %s the %s property at path %s has been deprecated",
+                    resource.getKind(),
+                    resource.getMetadata().getNamespace(),
+                    resource.getMetadata().getName(),
                     resource.getApiVersion(),
                     propertyName,
                     path(path, propertyName));
@@ -100,7 +112,10 @@ public class ValidationVisitor implements ResourceVisitor.Visitor {
             DeprecatedType deprecatedType = propertyValue.getClass().getAnnotation(DeprecatedType.class);
             if (deprecatedType != null
                     && isPresent(member, propertyValue)) {
-                String msg = String.format("In API version %s the object %s at path %s has been deprecated. ",
+                String msg = String.format("In resource %s(%s/%s) in API version %s the object %s at path %s has been deprecated. ",
+                        resource.getKind(),
+                        resource.getMetadata().getNamespace(),
+                        resource.getMetadata().getName(),
                         resource.getApiVersion(),
                         propertyName,
                         path(path, propertyName));
@@ -133,7 +148,10 @@ public class ValidationVisitor implements ResourceVisitor.Visitor {
         if (object instanceof UnknownPropertyPreserving) {
             Map<String, Object> properties = ((UnknownPropertyPreserving) object).getAdditionalProperties();
             if (properties != null && !properties.isEmpty()) {
-                String msg = String.format("Contains object at path %s with %s: %s",
+                String msg = String.format("Resource %s(%s/%s) contains object at path %s with %s: %s",
+                        resource.getKind(),
+                        resource.getMetadata().getNamespace(),
+                        resource.getMetadata().getName(),
                         String.join(".", path),
                         properties.size() == 1 ? "an unknown property" : "unknown properties",
                         String.join(", ", properties.keySet()));

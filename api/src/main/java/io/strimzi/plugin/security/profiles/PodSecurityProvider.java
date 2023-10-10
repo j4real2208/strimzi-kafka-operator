@@ -180,27 +180,31 @@ public interface PodSecurityProvider {
     }
 
     /**
-     * Provides the Pod security context for the JMXTrans pod. The default implementation just returns the security
-     * context configured by the user in the template section or null (no Pod security context).
+     * Previously, this method was responsible for providing PodSecurityContext for the JMXTrans deployment in Strimzi.
+     * However, since JMXTrans is no longer supported, this method has been deprecated and always returns null.
      *
      * @param context   Provides the context which can be used to generate the Pod security context
      *
      * @return  Pod security context which will be set for the JMXTrans pod
      */
+    @Deprecated
+    @SuppressWarnings("unused")
     default PodSecurityContext jmxTransPodSecurityContext(PodSecurityProviderContext context) {
-        return podSecurityContextOrNull(context);
+        return null;
     }
 
     /**
-     * Provides the (container) security context for the JMXTrans container. The default implementation just
-     * returns the security context configured by the user in the template section or null (no security context).
+     * Previously, this method was responsible for providing SecurityContext for the JMXTrans container in Strimzi.
+     * However, since JMXTrans is no longer supported, this method has been deprecated and always returns null.
      *
      * @param context   Provides the context which can be used to generate the security context
      *
      * @return  Security context which will be set for the JMXTrans container
      */
+    @Deprecated
+    @SuppressWarnings("unused")
     default SecurityContext jmxTransContainerSecurityContext(ContainerSecurityProviderContext context) {
-        return securityContextOrNull(context);
+        return null;
     }
 
     /**
@@ -238,6 +242,7 @@ public interface PodSecurityProvider {
     default SecurityContext kafkaConnectInitContainerSecurityContext(ContainerSecurityProviderContext context) {
         return securityContextOrNull(context);
     }
+
 
     /**
      * Provides the Pod security context for the Kafka Connect Build (Kaniko) pod. The default implementation just returns
@@ -310,6 +315,19 @@ public interface PodSecurityProvider {
     default SecurityContext bridgeContainerSecurityContext(ContainerSecurityProviderContext context) {
         return securityContextOrNull(context);
     }
+    
+    /**
+     * Provides the (container) security context for the Kafka Bridge init containers. The default implementation just
+     * returns the security context configured by the user in the template section or null (no security context).
+     *
+     * @param context   Provides the context which can be used to generate the security context
+     *
+     * @return  Security context which will be set for the Kafka Bridge init containers
+     */
+    default SecurityContext bridgeInitContainerSecurityContext(ContainerSecurityProviderContext context) {
+        return securityContextOrNull(context);
+    }
+
 
     /**
      * Internal method to handle the default Pod security context.

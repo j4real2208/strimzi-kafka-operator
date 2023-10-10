@@ -10,12 +10,10 @@ import io.fabric8.kubernetes.api.model.ConfigMapVolumeSourceBuilder;
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
-import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.HostAlias;
 import io.fabric8.kubernetes.api.model.HostAliasBuilder;
 import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
-import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.Quantity;
 import io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder;
 import io.fabric8.kubernetes.api.model.SecretKeySelectorBuilder;
@@ -36,6 +34,7 @@ import io.strimzi.api.kafka.model.CertSecretSourceBuilder;
 import io.strimzi.api.kafka.model.ContainerEnvVar;
 import io.strimzi.api.kafka.model.JmxPrometheusExporterMetrics;
 import io.strimzi.api.kafka.model.JmxPrometheusExporterMetricsBuilder;
+import io.strimzi.api.kafka.model.JvmOptions;
 import io.strimzi.api.kafka.model.KafkaJmxAuthenticationPasswordBuilder;
 import io.strimzi.api.kafka.model.KafkaJmxOptionsBuilder;
 import io.strimzi.api.kafka.model.KafkaMirrorMaker2;
@@ -55,13 +54,15 @@ import io.strimzi.api.kafka.model.template.ContainerTemplate;
 import io.strimzi.api.kafka.model.template.DeploymentStrategy;
 import io.strimzi.api.kafka.model.template.IpFamily;
 import io.strimzi.api.kafka.model.template.IpFamilyPolicy;
+import io.strimzi.api.kafka.model.tracing.OpenTelemetryTracing;
 import io.strimzi.kafka.oauth.client.ClientConfig;
 import io.strimzi.kafka.oauth.server.ServerConfig;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
-import io.strimzi.operator.common.MetricsAndLogging;
+import io.strimzi.operator.cluster.model.metrics.MetricsModel;
 import io.strimzi.operator.common.Reconciliation;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.OrderedProperties;
 import io.strimzi.platform.KubernetesVersion;
@@ -78,7 +79,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
@@ -95,6 +95,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ParallelSuite
 public class KafkaMirrorMaker2ClusterTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
+    
     private final String namespace = "test";
     private final String clusterName = "foo";
     private final int replicas = 2;
@@ -105,10 +107,10 @@ public class KafkaMirrorMaker2ClusterTest {
     private final String metricsCMName = "metrics-cm";
     private final ConfigMap metricsCM = io.strimzi.operator.cluster.TestUtils.getJmxMetricsCm(metricsCmJson, metricsCMName, "metrics-config.yml");
     private final JmxPrometheusExporterMetrics jmxMetricsConfig = io.strimzi.operator.cluster.TestUtils.getJmxPrometheusExporterMetrics("metrics-config.yml", metricsCMName);
-    private final String configurationJson = "{\"foo\":\"bar\"}";
+    private final String configurationJson = "foo: bar";
     private final String bootstrapServers = "foo-kafka:9092";
     private final String targetClusterAlias = "target";
-    private final String kafkaHeapOpts = "-Xms" + AbstractModel.DEFAULT_JVM_XMS;
+    private final String kafkaHeapOpts = "-Xms" + JvmOptionUtils.DEFAULT_JVM_XMS;
 
     private final OrderedProperties defaultConfiguration = new OrderedProperties()
             .addPair("config.storage.topic", "mirrormaker2-cluster-configs")
@@ -128,7 +130,7 @@ public class KafkaMirrorMaker2ClusterTest {
     private final KafkaMirrorMaker2ClusterSpec targetCluster = new KafkaMirrorMaker2ClusterSpecBuilder()
             .withAlias(targetClusterAlias)
             .withBootstrapServers(bootstrapServers)
-            .withConfig((Map<String, Object>) TestUtils.fromJson(configurationJson, Map.class))
+            .withConfig((Map<String, Object>) TestUtils.fromYamlString(configurationJson, Map.class))
             .build();
 
     private final KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(ResourceUtils.createEmptyKafkaMirrorMaker2(namespace, clusterName))
@@ -148,7 +150,7 @@ public class KafkaMirrorMaker2ClusterTest {
             .endSpec()
             .build();
 
-    private final KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resourceWithMetrics, VERSIONS);
+    private final KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resourceWithMetrics, VERSIONS, SHARED_ENV_PROVIDER);
     {
         // we were setting metricsEnabled in fromCrd, which was just checking it for non-null. With metrics in CM, we have to check
         // its content, what is done in generateMetricsAndLogConfigMap
@@ -162,7 +164,7 @@ public class KafkaMirrorMaker2ClusterTest {
     }
 
     private void checkMetricsConfigMap(ConfigMap metricsCm) {
-        assertThat(metricsCm.getData().get(AbstractModel.ANCILLARY_CM_KEY_METRICS), is(metricsCmJson));
+        assertThat(metricsCm.getData().get(MetricsModel.CONFIG_MAP_KEY), is(metricsCmJson));
     }
 
     private Map<String, String> expectedLabels(String name)    {
@@ -170,7 +172,8 @@ public class KafkaMirrorMaker2ClusterTest {
                 "my-user-label", "cromulent",
                 Labels.STRIMZI_NAME_LABEL, name,
                 Labels.STRIMZI_KIND_LABEL, KafkaMirrorMaker2.RESOURCE_KIND,
-                Labels.KUBERNETES_NAME_LABEL, KafkaMirrorMaker2Cluster.APPLICATION_NAME,
+                Labels.STRIMZI_COMPONENT_TYPE_LABEL, KafkaMirrorMaker2Cluster.COMPONENT_TYPE,
+                Labels.KUBERNETES_NAME_LABEL, KafkaMirrorMaker2Cluster.COMPONENT_TYPE,
                 Labels.KUBERNETES_INSTANCE_LABEL, this.clusterName,
                 Labels.KUBERNETES_PART_OF_LABEL, Labels.APPLICATION_NAME + "-" + this.clusterName,
                 Labels.KUBERNETES_MANAGED_BY_LABEL, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
@@ -189,7 +192,7 @@ public class KafkaMirrorMaker2ClusterTest {
         expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_CONFIGURATION).withValue(expectedConfiguration.asPairs()).build());
         expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_METRICS_ENABLED).withValue(String.valueOf(true)).build());
         expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_BOOTSTRAP_SERVERS).withValue(bootstrapServers).build());
-        expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED).withValue(Boolean.toString(AbstractModel.DEFAULT_JVM_GC_LOGGING_ENABLED)).build());
+        expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED).withValue(Boolean.toString(JvmOptions.DEFAULT_GC_LOGGING_ENABLED)).build());
         expected.add(new EnvVarBuilder().withName(AbstractModel.ENV_VAR_KAFKA_HEAP_OPTS).withValue(kafkaHeapOpts).build());
         expected.add(new EnvVarBuilder().withName(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_CLUSTERS).withValue(targetClusterAlias).build());
         return expected;
@@ -201,32 +204,32 @@ public class KafkaMirrorMaker2ClusterTest {
 
     @ParallelTest
     public void testDefaultValues() {
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, ResourceUtils.createEmptyKafkaMirrorMaker2(namespace, clusterName), VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, ResourceUtils.createEmptyKafkaMirrorMaker2(namespace, clusterName), VERSIONS, SHARED_ENV_PROVIDER);
 
         assertThat(kmm2.image, is(KafkaVersionTestUtils.DEFAULT_KAFKA_CONNECT_IMAGE));
-        assertThat(kmm2.replicas, is(KafkaMirrorMaker2Cluster.DEFAULT_REPLICAS));
-        assertThat(kmm2.readinessProbeOptions.getInitialDelaySeconds(), is(KafkaMirrorMaker2Cluster.DEFAULT_HEALTHCHECK_DELAY));
-        assertThat(kmm2.readinessProbeOptions.getTimeoutSeconds(), is(KafkaMirrorMaker2Cluster.DEFAULT_HEALTHCHECK_TIMEOUT));
-        assertThat(kmm2.livenessProbeOptions.getInitialDelaySeconds(), is(KafkaMirrorMaker2Cluster.DEFAULT_HEALTHCHECK_DELAY));
-        assertThat(kmm2.livenessProbeOptions.getTimeoutSeconds(), is(KafkaMirrorMaker2Cluster.DEFAULT_HEALTHCHECK_TIMEOUT));
-        assertThat(kmm2.getConfiguration().asOrderedProperties(), is(defaultConfiguration));
+        assertThat(kmm2.getReplicas(), is(3));
+        assertThat(kmm2.readinessProbeOptions.getInitialDelaySeconds(), is(60));
+        assertThat(kmm2.readinessProbeOptions.getTimeoutSeconds(), is(5));
+        assertThat(kmm2.livenessProbeOptions.getInitialDelaySeconds(), is(60));
+        assertThat(kmm2.livenessProbeOptions.getTimeoutSeconds(), is(5));
+        assertThat(kmm2.configuration.asOrderedProperties(), is(defaultConfiguration));
     }
 
     @ParallelTest
     public void testFromCrd() {
-        assertThat(kmm2.replicas, is(replicas));
+        assertThat(kmm2.getReplicas(), is(replicas));
         assertThat(kmm2.image, is(image));
         assertThat(kmm2.readinessProbeOptions.getInitialDelaySeconds(), is(healthDelay));
         assertThat(kmm2.readinessProbeOptions.getTimeoutSeconds(), is(healthTimeout));
         assertThat(kmm2.livenessProbeOptions.getInitialDelaySeconds(), is(healthDelay));
         assertThat(kmm2.livenessProbeOptions.getTimeoutSeconds(), is(healthTimeout));
-        assertThat(kmm2.getConfiguration().asOrderedProperties(), is(expectedConfiguration));
+        assertThat(kmm2.configuration.asOrderedProperties(), is(expectedConfiguration));
         assertThat(kmm2.bootstrapServers, is(bootstrapServers));
     }
 
     @ParallelTest
     public void testEnvVars() {
-        assertThat(kmm2.getEnvVars(), is(getExpectedEnvVars()));
+        assertThat(kmm2.getEnvVars(false), is(getExpectedEnvVars()));
     }
 
     @ParallelTest
@@ -234,7 +237,7 @@ public class KafkaMirrorMaker2ClusterTest {
         Service svc = kmm2.generateService();
 
         assertThat(svc.getSpec().getType(), is("ClusterIP"));
-        assertThat(svc.getMetadata().getLabels(), is(expectedLabels(kmm2.getServiceName())));
+        assertThat(svc.getMetadata().getLabels(), is(expectedLabels(kmm2.getComponentName())));
         assertThat(svc.getMetadata().getAnnotations().size(), is(0));
         assertThat(svc.getSpec().getSelector(), is(expectedSelectorLabels()));
         assertThat(svc.getSpec().getPorts().size(), is(1));
@@ -242,9 +245,9 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(svc.getSpec().getPorts().get(0).getName(), is(KafkaMirrorMaker2Cluster.REST_API_PORT_NAME));
         assertThat(svc.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
         assertThat(svc.getSpec().getIpFamilyPolicy(), is(nullValue()));
-        assertThat(svc.getSpec().getIpFamilies(), is(emptyList()));
+        assertThat(svc.getSpec().getIpFamilies(), is(nullValue()));
 
-        checkOwnerReference(kmm2.createOwnerReference(), svc);
+        TestUtils.checkOwnerReference(svc, resource);
     }
 
     @ParallelTest
@@ -254,11 +257,11 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withMetricsConfig(null)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Service svc = kmm2.generateService();
 
         assertThat(svc.getSpec().getType(), is("ClusterIP"));
-        assertThat(svc.getMetadata().getLabels(), is(expectedLabels(kmm2.getServiceName())));
+        assertThat(svc.getMetadata().getLabels(), is(expectedLabels(kmm2.getComponentName())));
         assertThat(svc.getSpec().getSelector(), is(expectedSelectorLabels()));
         assertThat(svc.getSpec().getPorts().size(), is(1));
         assertThat(svc.getSpec().getPorts().get(0).getPort(), is(KafkaMirrorMaker2Cluster.REST_API_PORT));
@@ -269,13 +272,13 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(svc.getMetadata().getAnnotations().containsKey("prometheus.io/scrape"), is(false));
         assertThat(svc.getMetadata().getAnnotations().containsKey("prometheus.io/path"), is(false));
 
-        checkOwnerReference(kmm2.createOwnerReference(), svc);
+        TestUtils.checkOwnerReference(svc, resource);
     }
 
     @ParallelTest
     public void testGenerateDeployment()   {
         Deployment dep = kmm2.generateDeployment(
-                new HashMap<>(), true, null, null);
+                replicas, null, new HashMap<>(), true, null, null, null);
 
         assertThat(dep.getMetadata().getName(), is(KafkaMirrorMaker2Resources.deploymentName(clusterName)));
         assertThat(dep.getMetadata().getNamespace(), is(namespace));
@@ -300,28 +303,30 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(dep.getSpec().getStrategy().getType(), is("RollingUpdate"));
         assertThat(dep.getSpec().getStrategy().getRollingUpdate().getMaxSurge().getIntVal(), is(1));
         assertThat(dep.getSpec().getStrategy().getRollingUpdate().getMaxUnavailable().getIntVal(), is(0));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is(nullValue()));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is(nullValue()));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().stream()
             .filter(volume -> volume.getName().equalsIgnoreCase("strimzi-tmp"))
-            .findFirst().get().getEmptyDir().getSizeLimit(), is(new Quantity(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
+            .findFirst().get().getEmptyDir().getSizeLimit(), is(new Quantity(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
 
-        checkOwnerReference(kmm2.createOwnerReference(), dep);
+        TestUtils.checkOwnerReference(dep, resource);
     }
 
     @ParallelTest
     public void withAffinity() throws IOException {
-        ResourceTester<KafkaMirrorMaker2, KafkaMirrorMaker2Cluster> resourceTester = new ResourceTester<>(KafkaMirrorMaker2.class, VERSIONS, (kafkaMirrorMaker2, versions) -> KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, versions), this.getClass().getSimpleName() + ".withAffinity");
+        ResourceTester<KafkaMirrorMaker2, KafkaMirrorMaker2Cluster> resourceTester = new ResourceTester<>(KafkaMirrorMaker2.class, VERSIONS, (kafkaMirrorMaker2, versions) ->
+            KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, versions, SHARED_ENV_PROVIDER), this.getClass().getSimpleName() + ".withAffinity");
         resourceTester
-            .assertDesiredResource("-Deployment.yaml", kmm2c -> kmm2c.generateDeployment(
-                    new HashMap<>(), true, null, null).getSpec().getTemplate().getSpec().getAffinity());
+            .assertDesiredModel("-Deployment.yaml", kmm2c -> kmm2c.generateDeployment(
+                    replicas, null, new HashMap<>(), true, null, null, null).getSpec().getTemplate().getSpec().getAffinity());
     }
 
     @ParallelTest
     public void withTolerations() throws IOException {
-        ResourceTester<KafkaMirrorMaker2, KafkaMirrorMaker2Cluster> resourceTester = new ResourceTester<>(KafkaMirrorMaker2.class, VERSIONS, (kafkaMirrorMaker2, versions) -> KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, versions), this.getClass().getSimpleName() + ".withTolerations");
+        ResourceTester<KafkaMirrorMaker2, KafkaMirrorMaker2Cluster> resourceTester = new ResourceTester<>(KafkaMirrorMaker2.class, VERSIONS, (kafkaMirrorMaker2, versions) ->
+            KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, versions, SHARED_ENV_PROVIDER), this.getClass().getSimpleName() + ".withTolerations");
         resourceTester
-            .assertDesiredResource("-Deployment.yaml", kmm2c -> kmm2c.generateDeployment(
-                    new HashMap<>(), true, null, null).getSpec().getTemplate().getSpec().getTolerations());
+            .assertDesiredModel("-Deployment.yaml", kmm2c -> kmm2c.generateDeployment(
+                    replicas, null, new HashMap<>(), true, null, null, null).getSpec().getTemplate().getSpec().getTolerations());
     }
 
     @ParallelTest
@@ -338,8 +343,8 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withClusters(targetClusterWithTls)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
-        Deployment dep = kmm2.generateDeployment(emptyMap(), true, null, null);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
+        Deployment dep = kmm2.generateDeployment(replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("my-another-secret"));
@@ -348,11 +353,11 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(2).getMountPath(), is(KafkaMirrorMaker2Cluster.TLS_CERTS_BASE_VOLUME_MOUNT + "my-secret"));
         assertThat(cont.getVolumeMounts().get(3).getMountPath(), is(KafkaMirrorMaker2Cluster.TLS_CERTS_BASE_VOLUME_MOUNT + "my-another-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TRUSTED_CERTS),
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TRUSTED_CERTS),
                 is("my-secret/cert.crt;my-secret/new-cert.crt;my-another-secret/another-cert.crt"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TLS_CLUSTERS), is("true"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TRUSTED_CERTS_CLUSTERS),
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TLS_CLUSTERS), is("true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TRUSTED_CERTS_CLUSTERS),
                 is("target=my-secret/cert.crt;my-secret/new-cert.crt;my-another-secret/another-cert.crt"));
     }
 
@@ -369,16 +374,16 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         Container cont = getContainer(dep);
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TRUSTED_CERTS),
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TRUSTED_CERTS),
                 is(nullValue()));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TLS_CLUSTERS), is("true"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TRUSTED_CERTS_CLUSTERS),
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TLS_CLUSTERS), is("true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_MIRRORMAKER_2_TRUSTED_CERTS_CLUSTERS),
                 is(nullValue()));
     }
 
@@ -403,9 +408,9 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withClusters(targetClusterWithTlsAuth)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("user-secret"));
 
@@ -413,9 +418,9 @@ public class KafkaMirrorMaker2ClusterTest {
 
         assertThat(cont.getVolumeMounts().get(3).getMountPath(), is(KafkaMirrorMaker2Cluster.TLS_CERTS_BASE_VOLUME_MOUNT + "user-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS_AUTH_CERT), is("user-secret/user.crt"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS_AUTH_KEY), is("user-secret/user.key"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS_AUTH_CERT), is("user-secret/user.crt"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS_AUTH_KEY), is("user-secret/user.key"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS), is("true"));
     }
 
     @ParallelTest
@@ -439,9 +444,9 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withClusters(targetClusterWithTlsAuth)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         // 3 = 1 volume from logging/metrics + 2 from above cert mounted for connect and for connectors
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(4));
@@ -464,9 +469,9 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withClusters(targetClusterWithScramSha512Auth)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("user1-secret"));
 
@@ -474,9 +479,9 @@ public class KafkaMirrorMaker2ClusterTest {
 
         assertThat(cont.getVolumeMounts().get(2).getMountPath(), is(KafkaMirrorMaker2Cluster.PASSWORD_VOLUME_MOUNT + "user1-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("scram-sha-512"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("scram-sha-512"));
     }
 
     /**
@@ -503,12 +508,12 @@ public class KafkaMirrorMaker2ClusterTest {
                 .withClusters(targetClusterWithScramSha512Auth)
             .endSpec()
             .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(4));
-        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("target-my-secret"));
@@ -516,8 +521,8 @@ public class KafkaMirrorMaker2ClusterTest {
         Container cont = getContainer(dep);
 
         assertThat(cont.getVolumeMounts().size(), is(6));
-        assertThat(cont.getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+        assertThat(cont.getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
         assertThat(cont.getVolumeMounts().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(cont.getVolumeMounts().get(1).getMountPath(), is("/opt/kafka/custom-config/"));
         assertThat(cont.getVolumeMounts().get(2).getName(), is("my-secret"));
@@ -529,10 +534,10 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(5).getName(), is("target-my-secret"));
         assertThat(cont.getVolumeMounts().get(5).getMountPath(), is(KafkaMirrorMaker2Cluster.MIRRORMAKER_2_PASSWORD_VOLUME_MOUNT + targetClusterAlias + "/my-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-512"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-512"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
     }
 
     /**
@@ -564,12 +569,12 @@ public class KafkaMirrorMaker2ClusterTest {
             .endSpec()
             .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(5));
-        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("target-my-secret"));
@@ -578,8 +583,8 @@ public class KafkaMirrorMaker2ClusterTest {
         Container cont = getContainer(dep);
 
         assertThat(cont.getVolumeMounts().size(), is(8));
-        assertThat(cont.getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+        assertThat(cont.getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
         assertThat(cont.getVolumeMounts().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(cont.getVolumeMounts().get(1).getMountPath(), is("/opt/kafka/custom-config/"));
         assertThat(cont.getVolumeMounts().get(2).getName(), is("my-secret"));
@@ -595,10 +600,10 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(7).getName(), is("source-my-secret"));
         assertThat(cont.getVolumeMounts().get(7).getMountPath(), is(KafkaMirrorMaker2Cluster.MIRRORMAKER_2_PASSWORD_VOLUME_MOUNT + "source/my-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-512"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-512"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
     }
 
     @ParallelTest
@@ -617,9 +622,9 @@ public class KafkaMirrorMaker2ClusterTest {
                 .withClusters(targetClusterWithScramSha256Auth)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("user1-secret"));
 
@@ -627,9 +632,9 @@ public class KafkaMirrorMaker2ClusterTest {
 
         assertThat(cont.getVolumeMounts().get(2).getMountPath(), is(KafkaMirrorMaker2Cluster.PASSWORD_VOLUME_MOUNT + "user1-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("scram-sha-256"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("scram-sha-256"));
     }
 
     /**
@@ -656,12 +661,12 @@ public class KafkaMirrorMaker2ClusterTest {
                 .withClusters(targetClusterWithScramSha256Auth)
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(4));
-        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("target-my-secret"));
@@ -669,8 +674,8 @@ public class KafkaMirrorMaker2ClusterTest {
         Container cont = getContainer(dep);
 
         assertThat(cont.getVolumeMounts().size(), is(6));
-        assertThat(cont.getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+        assertThat(cont.getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
         assertThat(cont.getVolumeMounts().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(cont.getVolumeMounts().get(1).getMountPath(), is("/opt/kafka/custom-config/"));
         assertThat(cont.getVolumeMounts().get(2).getName(), is("my-secret"));
@@ -682,10 +687,10 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(5).getName(), is("target-my-secret"));
         assertThat(cont.getVolumeMounts().get(5).getMountPath(), is(KafkaMirrorMaker2Cluster.MIRRORMAKER_2_PASSWORD_VOLUME_MOUNT + targetClusterAlias + "/my-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-256"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-256"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
     }
 
     /**
@@ -717,12 +722,12 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(5));
-        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("target-my-secret"));
@@ -731,8 +736,8 @@ public class KafkaMirrorMaker2ClusterTest {
         Container cont = getContainer(dep);
 
         assertThat(cont.getVolumeMounts().size(), is(8));
-        assertThat(cont.getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+        assertThat(cont.getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
         assertThat(cont.getVolumeMounts().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(cont.getVolumeMounts().get(1).getMountPath(), is("/opt/kafka/custom-config/"));
         assertThat(cont.getVolumeMounts().get(2).getName(), is("my-secret"));
@@ -748,10 +753,10 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(7).getName(), is("source-my-secret"));
         assertThat(cont.getVolumeMounts().get(7).getMountPath(), is(KafkaMirrorMaker2Cluster.MIRRORMAKER_2_PASSWORD_VOLUME_MOUNT + "source/my-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-256"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "scram-sha-256"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
     }
 
     @ParallelTest
@@ -770,9 +775,9 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withClusters(targetClusterWithPlainAuth)                
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("user1-secret"));
 
@@ -780,9 +785,9 @@ public class KafkaMirrorMaker2ClusterTest {
 
         assertThat(cont.getVolumeMounts().get(2).getMountPath(), is(KafkaMirrorMaker2Cluster.PASSWORD_VOLUME_MOUNT + "user1-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
-        assertThat(AbstractModel.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("plain"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE), is("user1-secret/password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME), is("user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont).get(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM), is("plain"));
     }
 
 
@@ -810,12 +815,12 @@ public class KafkaMirrorMaker2ClusterTest {
                 .withClusters(targetClusterWithPlainAuth)
             .endSpec()
             .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
 
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().toString(), dep.getSpec().getTemplate().getSpec().getVolumes().size(), is(4));
-        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(2).getName(), is("my-secret"));
         assertThat(dep.getSpec().getTemplate().getSpec().getVolumes().get(3).getName(), is("target-my-secret"));
@@ -823,8 +828,8 @@ public class KafkaMirrorMaker2ClusterTest {
         Container cont = getContainer(dep);
 
         assertThat(cont.getVolumeMounts().size(), is(6));
-        assertThat(cont.getVolumeMounts().get(0).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+        assertThat(cont.getVolumeMounts().get(0).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+        assertThat(cont.getVolumeMounts().get(0).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
         assertThat(cont.getVolumeMounts().get(1).getName(), is("kafka-metrics-and-logging"));
         assertThat(cont.getVolumeMounts().get(1).getMountPath(), is("/opt/kafka/custom-config/"));
         assertThat(cont.getVolumeMounts().get(2).getName(), is("my-secret"));
@@ -836,10 +841,10 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getVolumeMounts().get(5).getName(), is("target-my-secret"));
         assertThat(cont.getVolumeMounts().get(5).getMountPath(), is(KafkaMirrorMaker2Cluster.MIRRORMAKER_2_PASSWORD_VOLUME_MOUNT + targetClusterAlias + "/my-secret"));
 
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "plain"));
-        assertThat(AbstractModel.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_PASSWORD_FILE, "my-secret/user1.password"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_USERNAME, "user1"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM, "plain"));
+        assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(cont), hasEntry(KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_TLS, "true"));
     }
 
     @ParallelTest
@@ -926,11 +931,11 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getMetadata().getLabels().entrySet().containsAll(expectedDepLabels.entrySet()), is(true));
         assertThat(dep.getMetadata().getAnnotations().entrySet().containsAll(depAnots.entrySet()), is(true));
         assertThat(dep.getSpec().getTemplate().getSpec().getPriorityClassName(), is("top-priority"));
@@ -955,14 +960,9 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(svc.getSpec().getIpFamilies(), contains("IPv6", "IPv4"));
 
         // Check PodDisruptionBudget
-        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget();
+        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget(false);
         assertThat(pdb.getMetadata().getLabels().entrySet().containsAll(pdbLabels.entrySet()), is(true));
         assertThat(pdb.getMetadata().getAnnotations().entrySet().containsAll(pdbAnots.entrySet()), is(true));
-
-        // Check PodDisruptionBudget
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kmm2.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getMetadata().getLabels().entrySet().containsAll(pdbLabels.entrySet()), is(true));
-        assertThat(pdbV1Beta1.getMetadata().getAnnotations().entrySet().containsAll(pdbAnots.entrySet()), is(true));
 
         // Check ClusterRoleBinding
         ClusterRoleBinding crb = kmm2.generateClusterRoleBinding();
@@ -973,11 +973,6 @@ public class KafkaMirrorMaker2ClusterTest {
         ServiceAccount sa = kmm2.generateServiceAccount();
         assertThat(sa.getMetadata().getLabels().entrySet().containsAll(saLabels.entrySet()), is(true));
         assertThat(sa.getMetadata().getAnnotations().entrySet().containsAll(saAnots.entrySet()), is(true));
-    }
-
-    public void checkOwnerReference(OwnerReference ownerRef, HasMetadata resource)  {
-        assertThat(resource.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(resource.getMetadata().getOwnerReferences().get(0), is(ownerRef));
     }
 
     @ParallelTest
@@ -997,11 +992,11 @@ public class KafkaMirrorMaker2ClusterTest {
 
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<EnvVar> envs = getContainer(dep).getEnv();
         List<EnvVar> selected = envs.stream().filter(var -> var.getName().equals("MY_ENV_VAR")).collect(Collectors.toList());
         assertThat(selected.size(), is(1));
@@ -1025,11 +1020,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<EnvVar> envs = getContainer(dep).getEnv();
         List<EnvVar> selected = envs.stream().filter(var -> var.getName().equals("MY_ENV_VAR")).collect(Collectors.toList());
         assertThat(selected.size(), is(1));
@@ -1051,11 +1046,11 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<Volume> volumes = dep.getSpec().getTemplate().getSpec().getVolumes();
         List<Volume> selected = volumes.stream().filter(vol -> vol.getName().equals(KafkaMirrorMaker2Cluster.EXTERNAL_CONFIGURATION_VOLUME_NAME_PREFIX + "my-volume")).collect(Collectors.toList());
         assertThat(selected.size(), is(1));
@@ -1083,11 +1078,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<Volume> volumes = dep.getSpec().getTemplate().getSpec().getVolumes();
         List<Volume> selected = volumes.stream().filter(vol -> vol.getName().equals(KafkaMirrorMaker2Cluster.EXTERNAL_CONFIGURATION_VOLUME_NAME_PREFIX + "my-volume")).collect(Collectors.toList());
         assertThat(selected.size(), is(1));
@@ -1116,11 +1111,11 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<Volume> volumes = dep.getSpec().getTemplate().getSpec().getVolumes();
         List<Volume> selected = volumes.stream().filter(vol -> vol.getName().equals(KafkaMirrorMaker2Cluster.EXTERNAL_CONFIGURATION_VOLUME_NAME_PREFIX + "my-volume")).collect(Collectors.toList());
         assertThat(selected.size(), is(0));
@@ -1143,11 +1138,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<Volume> volumes = dep.getSpec().getTemplate().getSpec().getVolumes();
         List<Volume> selected = volumes.stream().filter(vol -> vol.getName().equals(KafkaMirrorMaker2Cluster.EXTERNAL_CONFIGURATION_VOLUME_NAME_PREFIX + "my-volume")).collect(Collectors.toList());
         assertThat(selected.size(), is(0));
@@ -1174,11 +1169,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<EnvVar> envs = getContainer(dep).getEnv();
         List<EnvVar> selected = envs.stream().filter(var -> var.getName().equals("MY_ENV_VAR")).collect(Collectors.toList());
         assertThat(selected.size(), is(0));
@@ -1199,11 +1194,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endExternalConfiguration()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         // Check Deployment
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         List<EnvVar> envs = getContainer(dep).getEnv();
         List<EnvVar> selected = envs.stream().filter(var -> var.getName().equals("MY_ENV_VAR")).collect(Collectors.toList());
         assertThat(selected.size(), is(0));
@@ -1220,19 +1215,19 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getTerminationGracePeriodSeconds(), is(123L));
     }
 
     @ParallelTest
     public void testDefaultGracePeriod() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource).build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
-        Deployment dep = kmm2.generateDeployment(emptyMap(), true, null, null);
+        Deployment dep = kmm2.generateDeployment(replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getTerminationGracePeriodSeconds(), is(30L));
     }
 
@@ -1250,10 +1245,10 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().size(), is(2));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret1), is(true));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret2), is(true));
@@ -1268,10 +1263,10 @@ public class KafkaMirrorMaker2ClusterTest {
         secrets.add(secret1);
         secrets.add(secret2);
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, this.resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, this.resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, secrets);
+                replicas, null, emptyMap(), true, null, secrets, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().size(), is(2));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret1), is(true));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret2), is(true));
@@ -1291,10 +1286,10 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, singletonList(secret1));
+                replicas, null, emptyMap(), true, null, singletonList(secret1), null);
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().size(), is(1));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret1), is(false));
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets().contains(secret2), is(true));
@@ -1303,10 +1298,10 @@ public class KafkaMirrorMaker2ClusterTest {
     @ParallelTest
     public void testDefaultImagePullSecrets() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource).build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getImagePullSecrets(), is(nullValue()));
     }
 
@@ -1321,10 +1316,10 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getSecurityContext(), is(notNullValue()));
         assertThat(dep.getSpec().getTemplate().getSpec().getSecurityContext().getFsGroup(), is(123L));
         assertThat(dep.getSpec().getTemplate().getSpec().getSecurityContext().getRunAsGroup(), is(456L));
@@ -1334,20 +1329,20 @@ public class KafkaMirrorMaker2ClusterTest {
     @ParallelTest
     public void testDefaultSecurityContext() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource).build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getSecurityContext(), is(nullValue()));
     }
 
     @ParallelTest
     public void testRestrictedSecurityContext() {
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         kmm2.securityProvider = new RestrictedPodSecurityProvider();
         kmm2.securityProvider.configure(new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION));
 
-        Deployment dep = kmm2.generateDeployment(emptyMap(), true, null, null);
+        Deployment dep = kmm2.generateDeployment(replicas, null, emptyMap(), true, null, null, null);
         assertThat(dep.getSpec().getTemplate().getSpec().getSecurityContext(), is(nullValue()));
         assertThat(dep.getSpec().getTemplate().getSpec().getContainers().get(0).getSecurityContext().getAllowPrivilegeEscalation(), is(false));
         assertThat(dep.getSpec().getTemplate().getSpec().getContainers().get(0).getSecurityContext().getRunAsNonRoot(), is(true));
@@ -1366,37 +1361,41 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endTemplate()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
-        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget();
+        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget(false);
+        assertThat(pdb.getSpec().getMinAvailable(), is(nullValue()));
         assertThat(pdb.getSpec().getMaxUnavailable(), is(new IntOrString(2)));
 
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kmm2.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getSpec().getMaxUnavailable(), is(new IntOrString(2)));
+        pdb = kmm2.generatePodDisruptionBudget(true);
+        assertThat(pdb.getSpec().getMinAvailable(), is(new IntOrString(0)));
+        assertThat(pdb.getSpec().getMaxUnavailable(), is(nullValue()));
     }
 
     @ParallelTest
     public void testDefaultPodDisruptionBudget() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource).build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
-        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget();
+        PodDisruptionBudget pdb = kmm2.generatePodDisruptionBudget(false);
+        assertThat(pdb.getSpec().getMinAvailable(), is(nullValue()));
         assertThat(pdb.getSpec().getMaxUnavailable(), is(new IntOrString(1)));
 
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kmm2.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getSpec().getMaxUnavailable(), is(new IntOrString(1)));
+        pdb = kmm2.generatePodDisruptionBudget(true);
+        assertThat(pdb.getSpec().getMinAvailable(), is(new IntOrString(1)));
+        assertThat(pdb.getSpec().getMaxUnavailable(), is(nullValue()));
     }
 
     @ParallelTest
     public void testImagePullPolicy() {
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                Collections.EMPTY_MAP, true, ImagePullPolicy.ALWAYS, null);
+                replicas, null, Collections.EMPTY_MAP, true, ImagePullPolicy.ALWAYS, null, null);
         assertThat(getContainer(dep).getImagePullPolicy(), is(ImagePullPolicy.ALWAYS.toString()));
 
         dep = kmm2.generateDeployment(
-                Collections.EMPTY_MAP, true, ImagePullPolicy.IFNOTPRESENT, null);
+                replicas, null, Collections.EMPTY_MAP, true, ImagePullPolicy.IFNOTPRESENT, null, null);
         assertThat(getContainer(dep).getImagePullPolicy(), is(ImagePullPolicy.IFNOTPRESENT.toString()));
     }
 
@@ -1415,10 +1414,10 @@ public class KafkaMirrorMaker2ClusterTest {
                     .withResources(new ResourceRequirementsBuilder().withLimits(limits).withRequests(requests).build())
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                Collections.EMPTY_MAP, true, null, null);
+                replicas, null, Collections.EMPTY_MAP, true, null, null, null);
         Container cont = getContainer(dep);
         assertThat(cont.getResources().getLimits(), is(limits));
         assertThat(cont.getResources().getRequests(), is(requests));
@@ -1439,10 +1438,10 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endJvmOptions()
                 .endSpec()
                 .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                Collections.EMPTY_MAP, true, null, null);
+                replicas, null, Collections.EMPTY_MAP, true, null, null, null);
         Container cont = getContainer(dep);
         assertThat(cont.getEnv().stream().filter(env -> "KAFKA_JVM_PERFORMANCE_OPTS".equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("-XX:+UseG1GC"), is(true));
         assertThat(cont.getEnv().stream().filter(env -> "KAFKA_JVM_PERFORMANCE_OPTS".equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("-XX:MaxGCPauseMillis=20"), is(true));
@@ -1479,7 +1478,7 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        List<EnvVar> kafkaEnvVars = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS).getEnvVars();
+        List<EnvVar> kafkaEnvVars = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER).getEnvVars(false);
 
         assertThat("Failed to correctly set container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -1517,7 +1516,7 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        List<EnvVar> kafkaEnvVars = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS).getEnvVars();
+        List<EnvVar> kafkaEnvVars = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER).getEnvVars(false);
 
         assertThat("Failed to prevent over writing existing container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -1528,21 +1527,26 @@ public class KafkaMirrorMaker2ClusterTest {
     }
 
     @ParallelTest
-    public void testTracing() {
-        KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource)
+    public void testOpenTelemetryTracing() {
+        KafkaMirrorMaker2Builder builder = new KafkaMirrorMaker2Builder(this.resource)
                 .editSpec()
-                    .withNewJaegerTracing()
-                    .endJaegerTracing()
-                .endSpec()
-                .build();
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+                    .withNewOpenTelemetryTracing()
+                    .endOpenTelemetryTracing()
+                .endSpec();
+        KafkaMirrorMaker2 resource = builder.build();
+
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
 
         Deployment dep = kmm2.generateDeployment(
-                Collections.EMPTY_MAP, true, null, null);
+                replicas, null, Collections.EMPTY_MAP, true, null, null, null);
         Container cont = getContainer(dep);
-        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_STRIMZI_TRACING.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").equals("jaeger"), is(true));
-        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_CONFIGURATION.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("consumer.interceptor.classes=io.opentracing.contrib.kafka.TracingConsumerInterceptor"), is(true));
-        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_CONFIGURATION.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("producer.interceptor.classes=io.opentracing.contrib.kafka.TracingProducerInterceptor"), is(true));
+        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_STRIMZI_TRACING.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").equals(OpenTelemetryTracing.TYPE_OPENTELEMETRY), is(true));
+        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_CONFIGURATION.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("consumer.interceptor.classes=" + OpenTelemetryTracing.CONSUMER_INTERCEPTOR_CLASS_NAME), is(true));
+        assertThat(cont.getEnv().stream().filter(env -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_CONFIGURATION.equals(env.getName())).map(EnvVar::getValue).findFirst().orElse("").contains("producer.interceptor.classes=" + OpenTelemetryTracing.PRODUCER_INTERCEPTOR_CLASS_NAME), is(true));
+    }
+
+    public void testTracing(String type, String consumerInterceptor, String producerInterceptor) {
+
     }
 
     @ParallelTest
@@ -1562,9 +1566,9 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         Container cont = getContainer(dep);
 
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM.equals(var.getName())).findFirst().orElseThrow().getValue(), is("oauth"));
@@ -1582,6 +1586,9 @@ public class KafkaMirrorMaker2ClusterTest {
                             .withTokenEndpointUri("http://my-oauth-server")
                             .withConnectTimeoutSeconds(15)
                             .withReadTimeoutSeconds(15)
+                            .withHttpRetries(2)
+                            .withHttpRetryPauseMs(500)
+                            .withEnableMetrics(true)
                             .withNewRefreshToken()
                                 .withSecretName("my-token-secret")
                                 .withKey("my-token-key")
@@ -1594,17 +1601,17 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         Container cont = getContainer(dep);
 
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM.equals(var.getName())).findFirst().orElseThrow().getValue(), is("oauth"));
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_REFRESH_TOKEN.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-token-secret"));
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_REFRESH_TOKEN.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("my-token-key"));
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CONFIG.equals(var.getName())).findFirst().orElseThrow().getValue().trim(),
-                is(String.format("%s=\"%s\" %s=\"%s\" %s=\"%s\" %s=\"%s\"", ClientConfig.OAUTH_CLIENT_ID, "my-client-id", ClientConfig.OAUTH_TOKEN_ENDPOINT_URI, "http://my-oauth-server",
-                        ClientConfig.OAUTH_CONNECT_TIMEOUT_SECONDS, "15", ClientConfig.OAUTH_READ_TIMEOUT_SECONDS, "15")));
+                is(String.format("%s=\"%s\" %s=\"%s\" %s=\"%s\" %s=\"%s\" %s=\"%s\" %s=\"%s\" %s=\"%s\"", ClientConfig.OAUTH_CLIENT_ID, "my-client-id", ClientConfig.OAUTH_TOKEN_ENDPOINT_URI, "http://my-oauth-server",
+                        ClientConfig.OAUTH_CONNECT_TIMEOUT_SECONDS, "15", ClientConfig.OAUTH_READ_TIMEOUT_SECONDS, "15", ClientConfig.OAUTH_HTTP_RETRIES, "2", ClientConfig.OAUTH_HTTP_RETRY_PAUSE_MILLIS, "500", ClientConfig.OAUTH_ENABLE_METRICS, "true")));
     }
 
     @ParallelTest
@@ -1626,9 +1633,9 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         Container cont = getContainer(dep);
 
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM.equals(var.getName())).findFirst().orElseThrow().getValue(), is("oauth"));
@@ -1636,6 +1643,44 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CLIENT_SECRET.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("my-secret-key"));
         assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CONFIG.equals(var.getName())).findFirst().orElseThrow().getValue().trim(),
                 is(String.format("%s=\"%s\" %s=\"%s\"", ClientConfig.OAUTH_CLIENT_ID, "my-client-id", ClientConfig.OAUTH_TOKEN_ENDPOINT_URI, "http://my-oauth-server")));
+    }
+
+    @ParallelTest
+    public void testGenerateDeploymentWithOAuthWithUsernameAndPassword() {
+        KafkaMirrorMaker2ClusterSpec targetClusterWithOAuthWithUsernameAndPassword = new KafkaMirrorMaker2ClusterSpecBuilder(this.targetCluster)
+                .withAuthentication(
+                        new KafkaClientAuthenticationOAuthBuilder()
+                                .withClientId("my-client-id")
+                                .withTokenEndpointUri("http://my-oauth-server")
+                                .withUsername("user1")
+                                .withNewPasswordSecret()
+                                    .withSecretName("my-password-secret")
+                                    .withPassword("user1.password")
+                                .endPasswordSecret()
+                                .withNewClientSecret()
+                                    .withSecretName("my-secret-secret")
+                                    .withKey("my-secret-key")
+                                .endClientSecret()
+                                .build())
+                .build();
+        KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resource)
+                .editSpec()
+                .withClusters(targetClusterWithOAuthWithUsernameAndPassword)
+                .endSpec()
+                .build();
+
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
+        Deployment dep = kmm2.generateDeployment(
+                replicas, null, emptyMap(), true, null, null, null);
+        Container cont = getContainer(dep);
+
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM.equals(var.getName())).findFirst().orElseThrow().getValue(), is("oauth"));
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_PASSWORD_GRANT_PASSWORD.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-password-secret"));
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_PASSWORD_GRANT_PASSWORD.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("user1.password"));
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CLIENT_SECRET.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-secret-secret"));
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CLIENT_SECRET.equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("my-secret-key"));
+        assertThat(cont.getEnv().stream().filter(var -> KafkaMirrorMaker2Cluster.ENV_VAR_KAFKA_CONNECT_OAUTH_CONFIG.equals(var.getName())).findFirst().orElseThrow().getValue().trim(),
+                is(String.format("%s=\"%s\" %s=\"%s\" %s=\"%s\"", ClientConfig.OAUTH_CLIENT_ID, "my-client-id", ClientConfig.OAUTH_PASSWORD_GRANT_USERNAME, "user1", ClientConfig.OAUTH_TOKEN_ENDPOINT_URI, "http://my-oauth-server")));
     }
 
     @ParallelTest
@@ -1654,7 +1699,7 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endSpec()
                     .build();
 
-            KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+            KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         });
     }
 
@@ -1677,7 +1722,7 @@ public class KafkaMirrorMaker2ClusterTest {
                     .endSpec()
                     .build();
 
-            KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+            KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         });
     }
 
@@ -1717,9 +1762,9 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         Deployment dep = kmm2.generateDeployment(
-                emptyMap(), true, null, null);
+                replicas, null, emptyMap(), true, null, null, null);
         Container cont = getContainer(dep);
 
         assertThat(cont.getEnv().stream().filter(var -> KafkaConnectCluster.ENV_VAR_KAFKA_CONNECT_SASL_MECHANISM.equals(var.getName())).findFirst().orElseThrow().getValue(), is("oauth"));
@@ -1751,12 +1796,12 @@ public class KafkaMirrorMaker2ClusterTest {
     public void testNetworkPolicy() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resourceWithMetrics)
                 .build();
-        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         kc.generateMetricsAndLogConfigMap(new MetricsAndLogging(metricsCM, null));
 
         NetworkPolicy np = kc.generateNetworkPolicy(true, "operator-namespace", null);
 
-        assertThat(np.getMetadata().getName(), is(kc.getName()));
+        assertThat(np.getMetadata().getName(), is(kc.getComponentName()));
         assertThat(np.getSpec().getPodSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
         assertThat(np.getSpec().getIngress().size(), is(2));
         assertThat(np.getSpec().getIngress().get(0).getPorts().size(), is(1));
@@ -1768,19 +1813,19 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getPodSelector().getMatchLabels(), is(singletonMap(Labels.STRIMZI_KIND_LABEL, "cluster-operator")));
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getNamespaceSelector().getMatchLabels(), is(Map.of()));
         assertThat(np.getSpec().getIngress().get(1).getPorts().size(), is(1));
-        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(KafkaConnectCluster.METRICS_PORT));
+        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(MetricsModel.METRICS_PORT));
     }
 
     @ParallelTest
     public void testNetworkPolicyWithConnectorOperatorSameNamespace() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resourceWithMetrics)
                 .build();
-        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         kc.generateMetricsAndLogConfigMap(new MetricsAndLogging(metricsCM, null));
 
         NetworkPolicy np = kc.generateNetworkPolicy(true, namespace, null);
 
-        assertThat(np.getMetadata().getName(), is(kc.getName()));
+        assertThat(np.getMetadata().getName(), is(kc.getComponentName()));
         assertThat(np.getSpec().getPodSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
         assertThat(np.getSpec().getIngress().size(), is(2));
         assertThat(np.getSpec().getIngress().get(0).getPorts().size(), is(1));
@@ -1791,19 +1836,19 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getPodSelector().getMatchLabels(), is(singletonMap(Labels.STRIMZI_KIND_LABEL, "cluster-operator")));
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getNamespaceSelector(), is(nullValue()));
         assertThat(np.getSpec().getIngress().get(1).getPorts().size(), is(1));
-        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(KafkaConnectCluster.METRICS_PORT));
+        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(MetricsModel.METRICS_PORT));
     }
 
     @ParallelTest
     public void testNetworkPolicyWithConnectorOperatorWithNamespaceLabels() {
         KafkaMirrorMaker2 resource = new KafkaMirrorMaker2Builder(this.resourceWithMetrics)
                 .build();
-        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kc = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         kc.generateMetricsAndLogConfigMap(new MetricsAndLogging(metricsCM, null));
 
         NetworkPolicy np = kc.generateNetworkPolicy(true, "operator-namespace", Labels.fromMap(Collections.singletonMap("nsLabelKey", "nsLabelValue")));
 
-        assertThat(np.getMetadata().getName(), is(kc.getName()));
+        assertThat(np.getMetadata().getName(), is(kc.getComponentName()));
         assertThat(np.getSpec().getPodSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
         assertThat(np.getSpec().getIngress().size(), is(2));
         assertThat(np.getSpec().getIngress().get(0).getPorts().size(), is(1));
@@ -1814,7 +1859,7 @@ public class KafkaMirrorMaker2ClusterTest {
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getPodSelector().getMatchLabels(), is(singletonMap(Labels.STRIMZI_KIND_LABEL, "cluster-operator")));
         assertThat(np.getSpec().getIngress().get(0).getFrom().get(1).getNamespaceSelector().getMatchLabels(), is(Collections.singletonMap("nsLabelKey", "nsLabelValue")));
         assertThat(np.getSpec().getIngress().get(1).getPorts().size(), is(1));
-        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(KafkaConnectCluster.METRICS_PORT));
+        assertThat(np.getSpec().getIngress().get(1).getPorts().get(0).getPort().getIntVal(), is(MetricsModel.METRICS_PORT));
     }
 
 
@@ -1832,10 +1877,11 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, VERSIONS, SHARED_ENV_PROVIDER);
 
-        assertThat(kmm.isMetricsEnabled(), is(true));
-        assertThat(kmm.getMetricsConfigInCm(), is(metrics));
+        assertThat(kmm.metrics().isEnabled(), is(true));
+        assertThat(kmm.metrics().getConfigMapName(), is("my-metrics-configuration"));
+        assertThat(kmm.metrics().getConfigMapKey(), is("config.yaml"));
     }
 
     @ParallelTest
@@ -1866,9 +1912,9 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm2 = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaMirrorMaker2, VERSIONS, SHARED_ENV_PROVIDER);
 
-        Secret jmxSecret = kmm2.generateJmxSecret();
+        Secret jmxSecret = kmm2.jmx().jmxSecret(null);
 
         for (Map.Entry<String, String> entry : customAnnotations.entrySet()) {
             assertThat(jmxSecret.getMetadata().getAnnotations(), hasEntry(entry.getKey(), entry.getValue()));
@@ -1880,10 +1926,11 @@ public class KafkaMirrorMaker2ClusterTest {
 
     @ParallelTest
     public void testMetricsParsingNoMetrics() {
-        KafkaMirrorMaker2Cluster kmm = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, this.resource, VERSIONS);
+        KafkaMirrorMaker2Cluster kmm = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, this.resource, VERSIONS, SHARED_ENV_PROVIDER);
 
-        assertThat(kmm.isMetricsEnabled(), is(false));
-        assertThat(kmm.getMetricsConfigInCm(), is(nullValue()));
+        assertThat(kmm.metrics().isEnabled(), is(false));
+        assertThat(kmm.metrics().getConfigMapName(), is(nullValue()));
+        assertThat(kmm.metrics().getConfigMapKey(), is(nullValue()));
     }
 
     @ParallelTest
@@ -1896,8 +1943,8 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
-        Deployment deployment = cluster.generateDeployment(new HashMap<>(), false, null, null);
+        KafkaMirrorMaker2Cluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
+        Deployment deployment = cluster.generateDeployment(replicas, null, new HashMap<>(), false, null, null, null);
 
         if (resource.getSpec().getRack() != null) {
             PodSpec podSpec = deployment.getSpec().getTemplate().getSpec();
@@ -1927,13 +1974,13 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaMirrorMaker2Cluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaMirrorMaker2Cluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         ClusterRoleBinding crb = cluster.generateClusterRoleBinding();
 
         assertThat(crb.getMetadata().getName(), is(KafkaMirrorMaker2Resources.initContainerClusterRoleBindingName(clusterName, testNamespace)));
         assertThat(crb.getMetadata().getNamespace(), is(nullValue()));
         assertThat(crb.getSubjects().get(0).getNamespace(), is(testNamespace));
-        assertThat(crb.getSubjects().get(0).getName(), is(cluster.getServiceAccountName()));
+        assertThat(crb.getSubjects().get(0).getName(), is(cluster.componentName));
     }
 
     @ParallelTest
@@ -1946,7 +1993,7 @@ public class KafkaMirrorMaker2ClusterTest {
                 .endMetadata()
                 .build();
 
-        KafkaConnectCluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS);
+        KafkaConnectCluster cluster = KafkaMirrorMaker2Cluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, resource, VERSIONS, SHARED_ENV_PROVIDER);
         ClusterRoleBinding crb = cluster.generateClusterRoleBinding();
 
         assertThat(crb, is(nullValue()));

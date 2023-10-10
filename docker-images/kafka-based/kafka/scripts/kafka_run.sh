@@ -2,6 +2,10 @@
 set -e
 set +x
 
+# Clean-up /tmp directory from files which might have remained from previous container restart
+# We ignore any errors which might be caused by files injected by different agents which we do not have the rights to delete
+rm -rfv /tmp/* || true
+
 STRIMZI_BROKER_ID=$(hostname | awk -F'-' '{print $NF}')
 export STRIMZI_BROKER_ID
 echo "STRIMZI_BROKER_ID=${STRIMZI_BROKER_ID}"
@@ -13,7 +17,7 @@ if [ -z "$KAFKA_LOG4J_OPTS" ]; then
   export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$KAFKA_HOME/custom-config/log4j.properties"
 fi
 
-. ./set_kafka_jmx_options.sh "${KAFKA_JMX_ENABLED}" "${KAFKA_JMX_USERNAME}" "${KAFKA_JMX_PASSWORD}"
+. ./set_kafka_jmx_options.sh "${STRIMZI_JMX_ENABLED}" "${STRIMZI_JMX_USERNAME}" "${STRIMZI_JMX_PASSWORD}"
 
 if [ -n "$STRIMZI_JAVA_SYSTEM_PROPERTIES" ]; then
     export KAFKA_OPTS="${KAFKA_OPTS} ${STRIMZI_JAVA_SYSTEM_PROPERTIES}"
@@ -63,13 +67,26 @@ if [ "$STRIMZI_KRAFT_ENABLED" = "true" ]; then
     echo "Kraft storage is already formatted"
   fi
 
-  touch /var/opt/kafka/kafka-ready
-  touch /var/opt/kafka/zk-connected
+  # remove quorum-state file so that we won't enter voter not match error after scaling up/down
+  if [ -f "$KRAFT_LOG_DIR/__cluster_metadata-0/quorum-state" ]; then
+    echo "Removing quorum-state file"
+    rm -f "$KRAFT_LOG_DIR/__cluster_metadata-0/quorum-state"
+  fi
+
+  # when in KRaft mode, the Kafka ready and ZooKeeper connected file paths are empty because not needed to the agent
+  KAFKA_READY=
+  ZK_CONNECTED=
 else
-  rm -f /var/opt/kafka/kafka-ready /var/opt/kafka/zk-connected 2> /dev/null
-  KAFKA_OPTS="${KAFKA_OPTS} -javaagent:$(ls "$KAFKA_HOME"/libs/kafka-agent*.jar)=/var/opt/kafka/kafka-ready:/var/opt/kafka/zk-connected"
-  export KAFKA_OPTS
+  # when in ZooKeeper mode, the Kafka ready and ZooKeeper connected file paths are defined because used by the agent
+  KAFKA_READY=/var/opt/kafka/kafka-ready
+  ZK_CONNECTED=/var/opt/kafka/zk-connected
+  rm -f $KAFKA_READY $ZK_CONNECTED 2> /dev/null
 fi
+
+KEY_STORE=/tmp/kafka/cluster.keystore.p12
+TRUST_STORE=/tmp/kafka/cluster.truststore.p12
+KAFKA_OPTS="${KAFKA_OPTS} -javaagent:$(ls "$KAFKA_HOME"/libs/kafka-agent*.jar)=$KAFKA_READY:$ZK_CONNECTED:$KEY_STORE:$CERTS_STORE_PASSWORD:$TRUST_STORE:$CERTS_STORE_PASSWORD"
+export KAFKA_OPTS
 
 # Configure Garbage Collection logging
 . ./set_kafka_gc_options.sh

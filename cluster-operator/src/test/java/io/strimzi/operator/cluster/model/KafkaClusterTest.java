@@ -9,10 +9,8 @@ import io.fabric8.kubernetes.api.model.ConfigMapKeySelectorBuilder;
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ContainerPort;
 import io.fabric8.kubernetes.api.model.EnvVar;
-import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.LabelSelectorRequirementBuilder;
-import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Quantity;
 import io.fabric8.kubernetes.api.model.ResourceRequirements;
@@ -69,11 +67,17 @@ import io.strimzi.api.kafka.model.template.IpFamily;
 import io.strimzi.api.kafka.model.template.IpFamilyPolicy;
 import io.strimzi.certs.OpenSslCertManager;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
-import io.strimzi.operator.cluster.operator.resource.cruisecontrol.CruiseControlConfigurationParameters;
-import io.strimzi.operator.common.MetricsAndLogging;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.cluster.model.jmx.JmxModel;
+import io.strimzi.operator.cluster.model.metrics.MetricsModel;
+import io.strimzi.operator.cluster.model.nodepools.NodePoolUtils;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlConfigurationParameters;
+import io.strimzi.operator.common.Annotations;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.Util;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.common.model.ClientsCa;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.test.TestUtils;
 import io.strimzi.test.annotations.ParallelSuite;
@@ -92,8 +96,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
+import static io.strimzi.operator.cluster.model.jmx.JmxModel.JMX_PORT;
+import static io.strimzi.operator.cluster.model.jmx.JmxModel.JMX_PORT_NAME;
 import static io.strimzi.test.TestUtils.set;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
@@ -101,7 +109,6 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.CoreMatchers.hasItem;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
@@ -117,6 +124,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ParallelSuite
 public class KafkaClusterTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
+
     private final static String NAMESPACE = "test";
     private final static String CLUSTER = "foo";
     private final static int REPLICAS = 3;
@@ -153,17 +162,12 @@ public class KafkaClusterTest {
                 .endKafka()
             .endSpec()
             .build();
-    private final static KafkaCluster KC = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+    private static final List<KafkaPool> POOLS = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, KAFKA, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+    private final static KafkaCluster KC = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, POOLS, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
     //////////
     // Utility methods
     //////////
-
-    private void checkOwnerReference(OwnerReference ownerRef, HasMetadata resource)  {
-        assertThat(resource.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(resource.getMetadata().getOwnerReferences().get(0), is(ownerRef));
-    }
-
     private Map<String, String> expectedSelectorLabels()    {
         return Map.of(Labels.STRIMZI_CLUSTER_LABEL, CLUSTER,
                 Labels.STRIMZI_NAME_LABEL, KafkaResources.kafkaStatefulSetName(CLUSTER),
@@ -175,21 +179,24 @@ public class KafkaClusterTest {
         assertThat(headless.getSpec().getType(), is("ClusterIP"));
         assertThat(headless.getSpec().getClusterIP(), is("None"));
         assertThat(headless.getSpec().getSelector(), is(expectedSelectorLabels()));
-        assertThat(headless.getSpec().getPorts().size(), is(4));
+        assertThat(headless.getSpec().getPorts().size(), is(5));
         assertThat(headless.getSpec().getPorts().get(0).getName(), is(KafkaCluster.CONTROLPLANE_PORT_NAME));
         assertThat(headless.getSpec().getPorts().get(0).getPort(), is(KafkaCluster.CONTROLPLANE_PORT));
         assertThat(headless.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
         assertThat(headless.getSpec().getPorts().get(1).getName(), is(KafkaCluster.REPLICATION_PORT_NAME));
         assertThat(headless.getSpec().getPorts().get(1).getPort(), is(KafkaCluster.REPLICATION_PORT));
         assertThat(headless.getSpec().getPorts().get(1).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(2).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_PLAIN_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(2).getPort(), is(9092));
+        assertThat(headless.getSpec().getPorts().get(2).getName(), is(KafkaCluster.KAFKA_AGENT_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(2).getPort(), is(KafkaCluster.KAFKA_AGENT_PORT));
         assertThat(headless.getSpec().getPorts().get(2).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(3).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_TLS_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(3).getPort(), is(9093));
+        assertThat(headless.getSpec().getPorts().get(3).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_PLAIN_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(3).getPort(), is(9092));
         assertThat(headless.getSpec().getPorts().get(3).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(4).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_TLS_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(4).getPort(), is(9093));
+        assertThat(headless.getSpec().getPorts().get(4).getProtocol(), is("TCP"));
         assertThat(headless.getSpec().getIpFamilyPolicy(), is(nullValue()));
-        assertThat(headless.getSpec().getIpFamilies(), is(emptyList()));
+        assertThat(headless.getSpec().getIpFamilies(), is(nullValue()));
 
         assertThat(headless.getMetadata().getLabels().containsKey(Labels.STRIMZI_DISCOVERY_LABEL), is(false));
     }
@@ -211,7 +218,18 @@ public class KafkaClusterTest {
     public void testMetricsConfigMap() {
         ConfigMap metricsCm = io.strimzi.operator.cluster.TestUtils.getJmxMetricsCm("{\"animal\":\"wombat\"}", "kafka-metrics-config", "kafka-metrics-config.yml");
 
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Map<Integer, Map<String, String>> advertisedHostnames = Map.of(
+                0, Map.of("PLAIN_9092", "broker-0"),
+                1, Map.of("PLAIN_9092", "broker-1"),
+                2, Map.of("PLAIN_9092", "broker-2")
+        );
+        Map<Integer, Map<String, String>> advertisedPorts = Map.of(
+                0, Map.of("PLAIN_9092", "9092"),
+                1, Map.of("PLAIN_9092", "9092"),
+                2, Map.of("PLAIN_9092", "9092")
+        );
+
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withNewJmxPrometheusExporterMetricsConfig()
@@ -222,11 +240,15 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        ConfigMap brokerCm = kc.generateMetricsAndLogConfigMap(new MetricsAndLogging(metricsCm, null));
-        checkOwnerReference(kc.createOwnerReference(), brokerCm);
-        assertThat(brokerCm.getData().get(AbstractModel.ANCILLARY_CM_KEY_METRICS), is("{\"animal\":\"wombat\"}"));
+        List<ConfigMap> cms = kc.generatePerBrokerConfigurationConfigMaps(new MetricsAndLogging(metricsCm, null), advertisedHostnames, advertisedPorts);
+
+        for (ConfigMap cm : cms)    {
+            TestUtils.checkOwnerReference(cm, KAFKA);
+            assertThat(cm.getData().get(MetricsModel.CONFIG_MAP_KEY), is("{\"animal\":\"wombat\"}"));
+        }
     }
 
     @ParallelTest
@@ -241,10 +263,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        assertThat(kc.getEnvVars().get(3).getName(), is("STRIMZI_JAVA_SYSTEM_PROPERTIES"));
-        assertThat(kc.getEnvVars().get(3).getValue(), is("-Djavax.net.debug=verbose -Dsomething.else=42"));
+        assertThat(kc.getEnvVars(pools.get(0)).get(3).getName(), is("STRIMZI_JAVA_SYSTEM_PROPERTIES"));
+        assertThat(kc.getEnvVars(pools.get(0)).get(3).getValue(), is("-Djavax.net.debug=verbose -Dsomething.else=42"));
     }
 
     @ParallelTest
@@ -258,15 +281,14 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check container
-        Container cont = kc.getContainers(null).get(0);
-        assertThat(cont.getImage(), is("my-image:my-tag"));
+        assertThat(kc.createContainer(null, pools.get(0)).getImage(), is("my-image:my-tag"));
 
         // Check Init container
-        Container initCont = kc.getInitContainers(null).get(0);
-        assertThat(initCont.getImage(), is("my-init-image:my-init-tag"));
+        assertThat(kc.createInitContainer(null, pools.get(0)).getImage(), is("my-init-image:my-init-tag"));
     }
 
     @ParallelTest
@@ -291,10 +313,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check container
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
         assertThat(cont.getLivenessProbe().getInitialDelaySeconds(), is(1));
         assertThat(cont.getLivenessProbe().getPeriodSeconds(), is(2));
         assertThat(cont.getLivenessProbe().getTimeoutSeconds(), is(3));
@@ -334,16 +357,13 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        List<Container> initConts = kc.getInitContainers(null);
-
-        assertThat(initConts,
-                hasItem(allOf(
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        assertThat(kc.createInitContainer(null, pools.get(0)),
+                allOf(
                         hasProperty("name", equalTo(KafkaCluster.INIT_NAME)),
                         hasProperty("securityContext", equalTo(securityContext))
-                )));
+                ));
     }
 
     @ParallelTest
@@ -363,26 +383,27 @@ public class KafkaClusterTest {
         assertThat(headful.getSpec().getPorts().get(2).getPort(), is(9093));
         assertThat(headful.getSpec().getPorts().get(2).getProtocol(), is("TCP"));
         assertThat(headful.getSpec().getIpFamilyPolicy(), is(nullValue()));
-        assertThat(headful.getSpec().getIpFamilies(), is(emptyList()));
+        assertThat(headful.getSpec().getIpFamilies(), is(nullValue()));
 
         assertThat(headful.getMetadata().getAnnotations(), is(Util.mergeLabelsOrAnnotations(KC.getInternalDiscoveryAnnotation())));
 
         assertThat(headful.getMetadata().getLabels().containsKey(Labels.STRIMZI_DISCOVERY_LABEL), is(true));
         assertThat(headful.getMetadata().getLabels().get(Labels.STRIMZI_DISCOVERY_LABEL), is("true"));
 
-        checkOwnerReference(KC.createOwnerReference(), headful);
+        TestUtils.checkOwnerReference(headful, KAFKA);
     }
 
     @ParallelTest
     public void testGenerateServiceWithoutMetrics() {
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withMetricsConfig(null)
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         Service headful = kc.generateService();
 
@@ -406,11 +427,52 @@ public class KafkaClusterTest {
         assertThat(headful.getMetadata().getLabels().containsKey(Labels.STRIMZI_DISCOVERY_LABEL), is(true));
         assertThat(headful.getMetadata().getLabels().get(Labels.STRIMZI_DISCOVERY_LABEL), is("true"));
 
-        checkOwnerReference(kc.createOwnerReference(), headful);
+        TestUtils.checkOwnerReference(headful, KAFKA);
     }
 
     @ParallelTest
     public void testGenerateHeadlessServiceWithJmxMetrics() {
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+                .editSpec()
+                    .editKafka()
+                        .withJmxOptions(new KafkaJmxOptionsBuilder().build())
+                    .endKafka()
+                .endSpec()
+                .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        Service headless = kc.generateHeadlessService();
+
+        assertThat(headless.getSpec().getType(), is("ClusterIP"));
+        assertThat(headless.getSpec().getSelector(), is(expectedSelectorLabels()));
+        assertThat(headless.getSpec().getPorts().size(), is(6));
+        assertThat(headless.getSpec().getPorts().get(0).getName(), is(KafkaCluster.CONTROLPLANE_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(0).getPort(), is(KafkaCluster.CONTROLPLANE_PORT));
+        assertThat(headless.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(1).getName(), is(KafkaCluster.REPLICATION_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(1).getPort(), is(KafkaCluster.REPLICATION_PORT));
+        assertThat(headless.getSpec().getPorts().get(1).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(2).getName(), is(KafkaCluster.KAFKA_AGENT_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(2).getPort(), is(KafkaCluster.KAFKA_AGENT_PORT));
+        assertThat(headless.getSpec().getPorts().get(2).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(3).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_PLAIN_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(3).getPort(), is(9092));
+        assertThat(headless.getSpec().getPorts().get(3).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(4).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_TLS_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(4).getPort(), is(9093));
+        assertThat(headless.getSpec().getPorts().get(4).getProtocol(), is("TCP"));
+        assertThat(headless.getSpec().getPorts().get(5).getName(), is(JmxModel.JMX_PORT_NAME));
+        assertThat(headless.getSpec().getPorts().get(5).getPort(), is(JmxModel.JMX_PORT));
+        assertThat(headless.getSpec().getPorts().get(5).getProtocol(), is("TCP"));
+
+        assertThat(headless.getMetadata().getLabels().containsKey(Labels.STRIMZI_DISCOVERY_LABEL), is(false));
+
+        TestUtils.checkOwnerReference(headless, KAFKA);
+    }
+
+    @ParallelTest
+    public void testExposesJmxContainerPortWhenJmxEnabled() {
         Kafka kafka = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
@@ -418,31 +480,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        Service headless = kc.generateHeadlessService();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        assertThat(headless.getSpec().getType(), is("ClusterIP"));
-        assertThat(headless.getSpec().getSelector(), is(expectedSelectorLabels()));
-        assertThat(headless.getSpec().getPorts().size(), is(5));
-        assertThat(headless.getSpec().getPorts().get(0).getName(), is(KafkaCluster.CONTROLPLANE_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(0).getPort(), is(KafkaCluster.CONTROLPLANE_PORT));
-        assertThat(headless.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(1).getName(), is(KafkaCluster.REPLICATION_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(1).getPort(), is(KafkaCluster.REPLICATION_PORT));
-        assertThat(headless.getSpec().getPorts().get(1).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(2).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_PLAIN_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(2).getPort(), is(9092));
-        assertThat(headless.getSpec().getPorts().get(2).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(3).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_TLS_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(3).getPort(), is(9093));
-        assertThat(headless.getSpec().getPorts().get(3).getProtocol(), is("TCP"));
-        assertThat(headless.getSpec().getPorts().get(4).getName(), is(KafkaCluster.JMX_PORT_NAME));
-        assertThat(headless.getSpec().getPorts().get(4).getPort(), is(KafkaCluster.JMX_PORT));
-        assertThat(headless.getSpec().getPorts().get(4).getProtocol(), is("TCP"));
-
-        assertThat(headless.getMetadata().getLabels().containsKey(Labels.STRIMZI_DISCOVERY_LABEL), is(false));
-
-        checkOwnerReference(kc.createOwnerReference(), headless);
+        ContainerPort jmxContainerPort = ContainerUtils.createContainerPort(JMX_PORT_NAME, JMX_PORT);
+        assertThat(kc.createContainer(ImagePullPolicy.IFNOTPRESENT, pools.get(0)).getPorts().contains(jmxContainerPort), is(true));
     }
 
     @SuppressWarnings({"checkstyle:MethodLength"})
@@ -553,7 +595,8 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check Service
         Service svc = kc.generateService();
@@ -575,7 +618,7 @@ public class KafkaClusterTest {
         assertThat(svc.getMetadata().getAnnotations().entrySet().containsAll(exSvcAnnotations.entrySet()), is(true));
 
         // Check per pod service
-        svc = kc.generateExternalServices(0).get(0);
+        svc = kc.generatePerPodServices().get(0);
         assertThat(svc.getMetadata().getLabels().entrySet().containsAll(perPodSvcLabels.entrySet()), is(true));
         assertThat(svc.getMetadata().getAnnotations().entrySet().containsAll(perPodSvcAnnotations.entrySet()), is(true));
 
@@ -585,7 +628,7 @@ public class KafkaClusterTest {
         assertThat(rt.getMetadata().getAnnotations().entrySet().containsAll(exRouteAnnotations.entrySet()), is(true));
 
         // Check PerPodRoute
-        rt = kc.generateExternalRoutes(0).get(0);
+        rt = kc.generateExternalRoutes().get(0);
         assertThat(rt.getMetadata().getLabels().entrySet().containsAll(perPodRouteLabels.entrySet()), is(true));
         assertThat(rt.getMetadata().getAnnotations().entrySet().containsAll(perPodRouteAnnotations.entrySet()), is(true));
 
@@ -594,10 +637,6 @@ public class KafkaClusterTest {
         assertThat(pdb.getMetadata().getLabels().entrySet().containsAll(pdbLabels.entrySet()), is(true));
         assertThat(pdb.getMetadata().getAnnotations().entrySet().containsAll(pdbAnnotations.entrySet()), is(true));
 
-        // Check PodDisruptionBudget V1Beta1
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kc.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getMetadata().getLabels().entrySet().containsAll(pdbLabels.entrySet()), is(true));
-        assertThat(pdbV1Beta1.getMetadata().getAnnotations().entrySet().containsAll(pdbAnnotations.entrySet()), is(true));
 
         // Check ClusterRoleBinding
         ClusterRoleBinding crb = kc.generateClusterRoleBinding("namespace");
@@ -639,8 +678,10 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        Secret jmxSecret = kc.generateJmxSecret(null);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        Secret jmxSecret = kc.jmx().jmxSecret(null);
 
         for (Map.Entry<String, String> entry : customAnnotations.entrySet()) {
             assertThat(jmxSecret.getMetadata().getAnnotations(), hasEntry(entry.getKey(), entry.getValue()));
@@ -663,13 +704,15 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        Secret jmxSecret = kc.generateJmxSecret(null);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        Secret jmxSecret = kc.jmx().jmxSecret(null);
 
         assertThat(jmxSecret.getData(), hasKey("jmx-username"));
         assertThat(jmxSecret.getData(), hasKey("jmx-password"));
 
-        Secret newJmxSecret = kc.generateJmxSecret(jmxSecret);
+        Secret newJmxSecret = kc.jmx().jmxSecret(jmxSecret);
 
         assertThat(newJmxSecret.getData(), hasKey("jmx-username"));
         assertThat(newJmxSecret.getData(), hasKey("jmx-password"));
@@ -681,42 +724,28 @@ public class KafkaClusterTest {
     public void testGenerateHeadlessService() {
         Service headless = KC.generateHeadlessService();
         checkHeadlessService(headless);
-        checkOwnerReference(KC.createOwnerReference(), headless);
+        TestUtils.checkOwnerReference(headless, KAFKA);
     }
 
     @ParallelTest
     public void testPerBrokerConfiguration() {
-        String config = KC.generateSharedBrokerConfiguration();
-
-        assertThat(config, CoreMatchers.containsString("broker.id=${STRIMZI_BROKER_ID}"));
-        assertThat(config, CoreMatchers.containsString("node.id=${STRIMZI_BROKER_ID}"));
-        assertThat(config, CoreMatchers.containsString("log.dirs=/var/lib/kafka/data-0/kafka-log${STRIMZI_BROKER_ID}"));
-        assertThat(config, CoreMatchers.containsString("advertised.listeners=CONTROLPLANE-9090://foo-kafka-${STRIMZI_BROKER_ID}.foo-kafka-brokers.test.svc:9090,REPLICATION-9091://foo-kafka-${STRIMZI_BROKER_ID}.foo-kafka-brokers.test.svc:9091,PLAIN-9092://${STRIMZI_PLAIN_9092_ADVERTISED_HOSTNAME}:${STRIMZI_PLAIN_9092_ADVERTISED_PORT},TLS-9093://${STRIMZI_TLS_9093_ADVERTISED_HOSTNAME}:${STRIMZI_TLS_9093_ADVERTISED_PORT}\n"));
-    }
-
-    @ParallelTest
-    public void testPerBrokerConfigMaps() {
-        MetricsAndLogging metricsAndLogging = new MetricsAndLogging(null, null);
         Map<Integer, Map<String, String>> advertisedHostnames = Map.of(
                 0, Map.of("PLAIN_9092", "broker-0", "TLS_9093", "broker-0"),
                 1, Map.of("PLAIN_9092", "broker-1", "TLS_9093", "broker-1"),
                 2, Map.of("PLAIN_9092", "broker-2", "TLS_9093", "broker-2")
         );
         Map<Integer, Map<String, String>> advertisedPorts = Map.of(
-                0, Map.of("PLAIN_9092", "10000", "TLS_9093", "20000"),
-                1, Map.of("PLAIN_9092", "10001", "TLS_9093", "20001"),
-                2, Map.of("PLAIN_9092", "10002", "TLS_9093", "20002")
+                0, Map.of("PLAIN_9092", "9092", "TLS_9093", "10000"),
+                1, Map.of("PLAIN_9092", "9092", "TLS_9093", "10001"),
+                2, Map.of("PLAIN_9092", "9092", "TLS_9093", "10002")
         );
 
-        ConfigMap cm = KC.generateSharedConfigurationConfigMap(metricsAndLogging, advertisedHostnames, advertisedPorts);
+        String config = KC.generatePerBrokerConfiguration(1, advertisedHostnames, advertisedPorts);
 
-        assertThat(cm.getData().size(), is(5));
-        assertThat(cm.getMetadata().getName(), is("foo-kafka-config"));
-        assertThat(cm.getData().get("log4j.properties"), is(notNullValue()));
-        assertThat(cm.getData().get("server.config"), is(notNullValue()));
-        assertThat(cm.getData().get("listeners.config"), is("PLAIN_9092 TLS_9093"));
-        assertThat(cm.getData().get("advertised-hostnames.config"), is("PLAIN_9092_0://broker-0 TLS_9093_0://broker-0 PLAIN_9092_1://broker-1 TLS_9093_1://broker-1 PLAIN_9092_2://broker-2 TLS_9093_2://broker-2"));
-        assertThat(cm.getData().get("advertised-ports.config"), is("PLAIN_9092_0://10000 TLS_9093_0://20000 PLAIN_9092_1://10001 TLS_9093_1://20001 PLAIN_9092_2://10002 TLS_9093_2://20002"));
+        assertThat(config, CoreMatchers.containsString("broker.id=1"));
+        assertThat(config, CoreMatchers.containsString("node.id=1"));
+        assertThat(config, CoreMatchers.containsString("log.dirs=/var/lib/kafka/data-0/kafka-log1"));
+        assertThat(config, CoreMatchers.containsString("advertised.listeners=CONTROLPLANE-9090://foo-kafka-1.foo-kafka-brokers.test.svc:9090,REPLICATION-9091://foo-kafka-1.foo-kafka-brokers.test.svc:9091,PLAIN-9092://broker-1:9092,TLS-9093://broker-1:10001\n"));
     }
 
     @ParallelTest
@@ -729,23 +758,24 @@ public class KafkaClusterTest {
 
     @ParallelTest
     public void testPvcNames() {
-        Kafka assembly = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withStorage(new PersistentClaimStorageBuilder().withDeleteClaim(false).withSize("100Gi").build())
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, assembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        List<PersistentVolumeClaim> pvcs = kc.getPersistentVolumeClaimTemplates();
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         for (int i = 0; i < REPLICAS; i++) {
-            assertThat(pvcs.get(0).getMetadata().getName() + "-" + KafkaResources.kafkaPodName(CLUSTER, i),
-                    is(KafkaCluster.VOLUME_NAME + "-" + KafkaResources.kafkaPodName(CLUSTER, i)));
+            assertThat(pvcs.get(i).getMetadata().getName(),
+                    is(VolumeUtils.DATA_VOLUME_NAME + "-" + KafkaResources.kafkaPodName(CLUSTER, i)));
         }
 
-        assembly = new KafkaBuilder(KAFKA)
+        kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withStorage(new JbodStorageBuilder().withVolumes(
@@ -755,15 +785,15 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, assembly, VERSIONS);
+        pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        pvcs = kc.getPersistentVolumeClaimTemplates();
+        pvcs = kc.generatePersistentVolumeClaims();
 
         for (int i = 0; i < REPLICAS; i++) {
-            int id = 0;
-            for (PersistentVolumeClaim pvc : pvcs) {
-                assertThat(pvc.getMetadata().getName() + "-" + KafkaResources.kafkaPodName(CLUSTER, i),
-                        is(KafkaCluster.VOLUME_NAME + "-" + id++ + "-" + KafkaResources.kafkaPodName(CLUSTER, i)));
+            for (int id = 0; id < 2; id++) {
+                assertThat(pvcs.get(i + (id * REPLICAS)).getMetadata().getName(),
+                        is(VolumeUtils.DATA_VOLUME_NAME + "-" + id + "-" + KafkaResources.kafkaPodName(CLUSTER, i)));
             }
         }
     }
@@ -781,19 +811,20 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(3));
 
         for (PersistentVolumeClaim pvc : pvcs) {
             assertThat(pvc.getSpec().getResources().getRequests().get("storage"), is(new Quantity("100Gi")));
             assertThat(pvc.getSpec().getStorageClassName(), is("gp2-ssd"));
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(1));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
         }
     }
 
@@ -806,19 +837,20 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(3));
 
         for (PersistentVolumeClaim pvc : pvcs) {
             assertThat(pvc.getSpec().getResources().getRequests().get("storage"), is(new Quantity("100Gi")));
             assertThat(pvc.getSpec().getStorageClassName(), is("gp2-ssd"));
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(0));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
         }
     }
 
@@ -839,10 +871,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(3));
 
@@ -857,9 +891,9 @@ public class KafkaClusterTest {
                 assertThat(pvc.getSpec().getStorageClassName(), is("gp2-ssd-az1"));
             }
 
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(0));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
         }
     }
 
@@ -886,10 +920,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(6));
 
@@ -903,9 +938,9 @@ public class KafkaClusterTest {
                 assertThat(pvc.getSpec().getStorageClassName(), is("gp2-ssd-az1"));
             }
 
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(0));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
         }
 
         for (int i = 3; i < 6; i++) {
@@ -918,9 +953,9 @@ public class KafkaClusterTest {
                 assertThat(pvc.getSpec().getStorageClassName(), is("gp2-st1-az1"));
             }
 
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(1));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
         }
     }
 
@@ -936,10 +971,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(6));
 
@@ -947,18 +983,18 @@ public class KafkaClusterTest {
             PersistentVolumeClaim pvc = pvcs.get(i);
             assertThat(pvc.getSpec().getResources().getRequests().get("storage"), is(new Quantity("100Gi")));
             assertThat(pvc.getSpec().getStorageClassName(), is("gp2-ssd"));
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(0));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("false"));
         }
 
         for (int i = 3; i < 6; i++) {
             PersistentVolumeClaim pvc = pvcs.get(i);
             assertThat(pvc.getSpec().getResources().getRequests().get("storage"), is(new Quantity("1000Gi")));
             assertThat(pvc.getSpec().getStorageClassName(), is("gp2-st1"));
-            assertThat(pvc.getMetadata().getName().startsWith(KafkaCluster.VOLUME_NAME), is(true));
+            assertThat(pvc.getMetadata().getName().startsWith(VolumeUtils.DATA_VOLUME_NAME), is(true));
             assertThat(pvc.getMetadata().getOwnerReferences().size(), is(1));
-            assertThat(pvc.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
+            assertThat(pvc.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM), is("true"));
         }
     }
 
@@ -986,10 +1022,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
 
         // Env Vars
         assertThat(cont.getEnv().stream().filter(var -> "STRIMZI_PLAIN_9092_OAUTH_CLIENT_SECRET".equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-secret-secret"));
@@ -1037,22 +1073,22 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
 
         // Env Vars
         assertThat(cont.getEnv().stream().filter(var -> "STRIMZI_PLAIN_9092_OAUTH_CLIENT_SECRET".equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-secret-secret"));
         assertThat(cont.getEnv().stream().filter(var -> "STRIMZI_PLAIN_9092_OAUTH_CLIENT_SECRET".equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("my-secret-key"));
 
         // Volume mounts
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-0"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/second-certificate-1"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-2"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-0"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/second-certificate-1"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-2"));
 
         // Volumes
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
 
         assertThat(volumes.stream().filter(vol -> "oauth-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().size(), is(1));
         assertThat(volumes.stream().filter(vol -> "oauth-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().get(0).getKey(), is("ca.crt"));
@@ -1144,10 +1180,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
 
         // Test Env Vars
         assertThat(cont.getEnv().stream().filter(var -> "STRIMZI_PLAIN_9092_OAUTH_CLIENT_SECRET".equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getName(), is("my-secret-secret"));
@@ -1160,20 +1196,20 @@ public class KafkaClusterTest {
         assertThat(cont.getEnv().stream().filter(var -> "STRIMZI_EXTERNAL_9094_OAUTH_CLIENT_SECRET".equals(var.getName())).findFirst().orElseThrow().getValueFrom().getSecretKeyRef().getKey(), is("my-secret-key"));
 
         // Volume mounts
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-0"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/second-certificate-1"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-2"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-0"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/second-certificate-1"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-plain-9092-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-plain-9092-certs/first-certificate-2"));
 
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/first-certificate-0"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/second-certificate-1"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/first-certificate-2"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/first-certificate-0"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/second-certificate-1"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-tls-9093-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-tls-9093-certs/first-certificate-2"));
 
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/first-certificate-0"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/second-certificate-1"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/first-certificate-2"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/first-certificate-0"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/second-certificate-1"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "oauth-external-9094-2".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/oauth-external-9094-certs/first-certificate-2"));
 
         // Volumes
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
 
         assertThat(volumes.stream().filter(vol -> "oauth-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().size(), is(1));
         assertThat(volumes.stream().filter(vol -> "oauth-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().get(0).getKey(), is("ca.crt"));
@@ -1225,16 +1261,16 @@ public class KafkaClusterTest {
                 .endKafka()
                 .endSpec()
                 .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Volume mounts
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
         assertThat(cont.getVolumeMounts().stream().filter(mount -> "custom-listener-plain-9092-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.CUSTOM_AUTHN_SECRETS_VOLUME_MOUNT + "/custom-listener-plain-9092/test"));
         assertThat(cont.getVolumeMounts().stream().filter(mount -> "custom-listener-plain-9092-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.CUSTOM_AUTHN_SECRETS_VOLUME_MOUNT + "/custom-listener-plain-9092/test2"));
 
         // Volumes
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
 
         assertThat(volumes.stream().filter(vol -> "custom-listener-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().size(), is(1));
         assertThat(volumes.stream().filter(vol -> "custom-listener-plain-9092-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().get(0).getKey(), is("foo"));
@@ -1270,10 +1306,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
         Volume vol = volumes.stream().filter(v -> "custom-external-9094-certs".equals(v.getName())).findFirst().orElse(null);
 
         assertThat(vol, is(notNullValue()));
@@ -1283,7 +1319,7 @@ public class KafkaClusterTest {
         assertThat(vol.getSecret().getItems().get(1).getKey(), is(cert));
         assertThat(vol.getSecret().getItems().get(1).getPath(), is("tls.crt"));
 
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
         VolumeMount mount = cont.getVolumeMounts().stream().filter(v -> "custom-external-9094-certs".equals(v.getName())).findFirst().orElse(null);
 
         assertThat(mount, is(notNullValue()));
@@ -1316,10 +1352,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
         Volume vol = volumes.stream().filter(v -> "custom-tls-9093-certs".equals(v.getName())).findFirst().orElse(null);
 
         assertThat(vol, is(notNullValue()));
@@ -1329,7 +1365,7 @@ public class KafkaClusterTest {
         assertThat(vol.getSecret().getItems().get(1).getKey(), is(cert));
         assertThat(vol.getSecret().getItems().get(1).getPath(), is("tls.crt"));
 
-        Container cont = kc.getContainers(null).get(0);
+        Container cont = kc.createContainer(null, pools.get(0));
         VolumeMount mount = cont.getVolumeMounts().stream().filter(v -> "custom-tls-9093-certs".equals(v.getName())).findFirst().orElse(null);
 
         assertThat(mount, is(notNullValue()));
@@ -1384,16 +1420,16 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Volume mounts
-        Container cont = kc.getContainers(null).get(0);
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "authz-keycloak-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/authz-keycloak-certs/first-certificate-0"));
-        assertThat(cont.getVolumeMounts().stream().filter(mount -> "authz-keycloak-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.OAUTH_TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/authz-keycloak-certs/second-certificate-1"));
+        Container cont = kc.createContainer(null, pools.get(0));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "authz-keycloak-0".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/authz-keycloak-certs/first-certificate-0"));
+        assertThat(cont.getVolumeMounts().stream().filter(mount -> "authz-keycloak-1".equals(mount.getName())).findFirst().orElseThrow().getMountPath(), is(KafkaCluster.TRUSTED_CERTS_BASE_VOLUME_MOUNT + "/authz-keycloak-certs/second-certificate-1"));
 
         // Volumes
-        List<Volume> volumes = kc.getNonDataVolumes(false, false, null);
+        List<Volume> volumes = kc.getNonDataVolumes(false, kafkaAssembly.getMetadata().getName() + "-1", null);
         assertThat(volumes.stream().filter(vol -> "authz-keycloak-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().size(), is(1));
         assertThat(volumes.stream().filter(vol -> "authz-keycloak-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().get(0).getKey(), is("ca.crt"));
         assertThat(volumes.stream().filter(vol -> "authz-keycloak-0".equals(vol.getName())).findFirst().orElseThrow().getSecret().getItems().get(0).getPath(), is("tls.crt"));
@@ -1411,10 +1447,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
         assertThat(pvcs.size(), is(3));
 
         for (int i = 0; i < 3; i++) {
@@ -1433,10 +1470,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
         assertThat(pvcs.size(), is(3));
 
         for (int i = 0; i < 3; i++) {
@@ -1463,28 +1501,41 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check port
         List<ContainerPort> ports = kc.getContainerPortList();
-        assertThat(ports.contains(kc.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, "TCP")), is(true));
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getMetadata().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(ext.getSpec().getType(), is("ClusterIP"));
         assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
-        assertThat(ext.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-        checkOwnerReference(kc.createOwnerReference(), ext);
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        TestUtils.checkOwnerReference(ext, KAFKA);
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(srv.getSpec().getType(), is("ClusterIP"));
             assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
-            assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-            checkOwnerReference(kc.createOwnerReference(), srv);
+            assertThat(srv.getSpec().getPorts().size(), is(1));
+            assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+            assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+            assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+            TestUtils.checkOwnerReference(srv, KAFKA);
         }
 
         // Check bootstrap route
@@ -1494,17 +1545,19 @@ public class KafkaClusterTest {
         assertThat(brt.getSpec().getTo().getKind(), is("Service"));
         assertThat(brt.getSpec().getTo().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(brt.getSpec().getPort().getTargetPort(), is(new IntOrString(9094)));
-        checkOwnerReference(kc.createOwnerReference(), brt);
+        TestUtils.checkOwnerReference(brt, KAFKA);
 
         // Check per pod router
+        List<Route> routes = kc.generateExternalRoutes();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Route rt = kc.generateExternalRoutes(i).get(0);
+            Route rt = routes.get(i);
             assertThat(rt.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(rt.getSpec().getTls().getTermination(), is("passthrough"));
             assertThat(rt.getSpec().getTo().getKind(), is("Service"));
             assertThat(rt.getSpec().getTo().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(rt.getSpec().getPort().getTargetPort(), is(new IntOrString(9094)));
-            checkOwnerReference(kc.createOwnerReference(), rt);
+            TestUtils.checkOwnerReference(rt, KAFKA);
         }
     }
 
@@ -1543,7 +1596,8 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check bootstrap route
         Route brt = kc.generateExternalBootstrapRoutes().get(0);
@@ -1551,8 +1605,10 @@ public class KafkaClusterTest {
         assertThat(brt.getSpec().getHost(), is("my-boostrap.cz"));
 
         // Check per pod router
+        List<Route> routes = kc.generateExternalRoutes();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Route rt = kc.generateExternalRoutes(i).get(0);
+            Route rt = routes.get(i);
             assertThat(rt.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(rt.getSpec().getHost(), is("my-host-" + i + ".cz"));
         }
@@ -1597,7 +1653,8 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check bootstrap route
         Route brt = kc.generateExternalBootstrapRoutes().get(0);
@@ -1606,8 +1663,10 @@ public class KafkaClusterTest {
         assertThat(brt.getMetadata().getLabels().get("label"), is("label-value"));
 
         // Check per pod router
+        List<Route> routes = kc.generateExternalRoutes();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Route rt = kc.generateExternalRoutes(i).get(0);
+            Route rt = routes.get(i);
             assertThat(rt.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(rt.getMetadata().getAnnotations().get("anno"), is("anno-value-" + i));
             assertThat(rt.getMetadata().getLabels().get("label"), is("label-value-" + i));
@@ -1630,11 +1689,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check port
         List<ContainerPort> ports = kc.getContainerPortList();
-        assertThat(ports.contains(kc.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, "TCP")), is(true));
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
@@ -1642,24 +1702,36 @@ public class KafkaClusterTest {
         assertThat(ext.getMetadata().getFinalizers(), is(emptyList()));
         assertThat(ext.getSpec().getType(), is("LoadBalancer"));
         assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
-        assertThat(ext.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
         assertThat(ext.getSpec().getLoadBalancerIP(), is(nullValue()));
         assertThat(ext.getSpec().getExternalTrafficPolicy(), is("Cluster"));
         assertThat(ext.getSpec().getLoadBalancerSourceRanges(), is(emptyList()));
-        checkOwnerReference(kc.createOwnerReference(), ext);
+        TestUtils.checkOwnerReference(ext, KAFKA);
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(srv.getMetadata().getFinalizers(), is(emptyList()));
             assertThat(srv.getSpec().getType(), is("LoadBalancer"));
             assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
-            assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
+            assertThat(srv.getSpec().getPorts().size(), is(1));
+            assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+            assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+            assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
             assertThat(srv.getSpec().getLoadBalancerIP(), is(nullValue()));
             assertThat(srv.getSpec().getExternalTrafficPolicy(), is("Cluster"));
             assertThat(srv.getSpec().getLoadBalancerSourceRanges(), is(emptyList()));
-            checkOwnerReference(kc.createOwnerReference(), srv);
+            TestUtils.checkOwnerReference(srv, KAFKA);
         }
     }
 
@@ -1682,7 +1754,8 @@ public class KafkaClusterTest {
                 .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check external bootstrap service
         assertThat(kc.generateExternalBootstrapServices().isEmpty(), is(true));
@@ -1705,15 +1778,18 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getSpec().getExternalTrafficPolicy(), is(ExternalTrafficPolicy.LOCAL.toValue()));
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getSpec().getExternalTrafficPolicy(), is(ExternalTrafficPolicy.LOCAL.toValue()));
         }
     }
@@ -1735,15 +1811,18 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getSpec().getExternalTrafficPolicy(), is(ExternalTrafficPolicy.CLUSTER.toValue()));
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getSpec().getExternalTrafficPolicy(), is(ExternalTrafficPolicy.CLUSTER.toValue()));
         }
     }
@@ -1767,15 +1846,18 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getMetadata().getFinalizers(), is(finalizers));
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getFinalizers(), is(finalizers));
         }
     }
@@ -1799,15 +1881,18 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getSpec().getLoadBalancerSourceRanges(), is(sourceRanges));
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getSpec().getLoadBalancerSourceRanges(), is(sourceRanges));
         }
     }
@@ -1847,17 +1932,20 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check annotations
         assertThat(kc.generateExternalBootstrapServices().get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "bootstrap.myingress.com.")));
         assertThat(kc.generateExternalBootstrapServices().get(0).getMetadata().getLabels().get("label"), is("label-value"));
-        assertThat(kc.generateExternalServices(0).get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-0.myingress.com.")));
-        assertThat(kc.generateExternalServices(0).get(0).getMetadata().getLabels().get("label"), is("label-value"));
-        assertThat(kc.generateExternalServices(1).get(0).getMetadata().getAnnotations().isEmpty(), is(true));
-        assertThat(kc.generateExternalServices(1).get(0).getMetadata().getLabels().get("label"), is(nullValue()));
-        assertThat(kc.generateExternalServices(2).get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-2.myingress.com.")));
-        assertThat(kc.generateExternalServices(2).get(0).getMetadata().getLabels().get("label"), is("label-value"));
+
+        List<Service> services = kc.generatePerPodServices();
+        assertThat(services.get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-0.myingress.com.")));
+        assertThat(services.get(0).getMetadata().getLabels().get("label"), is("label-value"));
+        assertThat(services.get(1).getMetadata().getAnnotations().isEmpty(), is(true));
+        assertThat(services.get(1).getMetadata().getLabels().get("label"), is(nullValue()));
+        assertThat(services.get(2).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-2.myingress.com.")));
+        assertThat(services.get(2).getMetadata().getLabels().get("label"), is("label-value"));
     }
 
     @ParallelTest
@@ -1892,13 +1980,48 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check annotations
         assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getLoadBalancerIP(), is("10.0.0.1"));
-        assertThat(kc.generateExternalServices(0).get(0).getSpec().getLoadBalancerIP(), is("10.0.0.2"));
-        assertThat(kc.generateExternalServices(1).get(0).getSpec().getLoadBalancerIP(), is(nullValue()));
-        assertThat(kc.generateExternalServices(2).get(0).getSpec().getLoadBalancerIP(), is("10.0.0.3"));
+
+        List<Service> services = kc.generatePerPodServices();
+        assertThat(services.get(0).getSpec().getLoadBalancerIP(), is("10.0.0.2"));
+        assertThat(services.get(1).getSpec().getLoadBalancerIP(), is(nullValue()));
+        assertThat(services.get(2).getSpec().getLoadBalancerIP(), is("10.0.0.3"));
+    }
+
+    @ParallelTest
+    public void testExternalLoadBalancersWithLoadBalancerClass() {
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+                .editSpec()
+                .editKafka()
+                .withListeners(new GenericKafkaListenerBuilder()
+                        .withName("external")
+                        .withPort(9094)
+                        .withType(KafkaListenerType.LOADBALANCER)
+                        .withNewConfiguration()
+                            .withControllerClass("metallb-class")
+                        .endConfiguration()
+                        .withTls(true)
+                        .build())
+                .endKafka()
+                .endSpec()
+                .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        // Check Service Class
+        Service ext = kc.generateExternalBootstrapServices().get(0);
+        assertThat(ext.getSpec().getLoadBalancerClass(), is("metallb-class"));
+
+        List<Service> services = kc.generatePerPodServices();
+
+        for (int i = 0; i < REPLICAS; i++) {
+            Service service = services.get(i);
+            assertThat(service.getSpec().getLoadBalancerClass(), is("metallb-class"));
+        }
     }
 
     @ParallelTest
@@ -1936,18 +2059,20 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check annotations
         assertThat(kc.generateExternalBootstrapServices().get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "bootstrap.myingress.com.")));
         assertThat(kc.generateExternalBootstrapServices().get(0).getMetadata().getLabels().get("label"), is("label-value"));
-        assertThat(kc.generateExternalServices(0).get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-0.myingress.com.")));
-        assertThat(kc.generateExternalServices(0).get(0).getMetadata().getLabels().get("label"), is("label-value"));
-        assertThat(kc.generateExternalServices(1).get(0).getMetadata().getAnnotations().isEmpty(), is(true));
-        assertThat(kc.generateExternalServices(1).get(0).getMetadata().getLabels().get("label"), is(nullValue()));
-        assertThat(kc.generateExternalServices(2).get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-2.myingress.com.")));
-        assertThat(kc.generateExternalServices(2).get(0).getMetadata().getLabels().get("label"), is("label-value"));
 
+        List<Service> services = kc.generatePerPodServices();
+        assertThat(services.get(0).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-0.myingress.com.")));
+        assertThat(services.get(0).getMetadata().getLabels().get("label"), is("label-value"));
+        assertThat(services.get(1).getMetadata().getAnnotations().isEmpty(), is(true));
+        assertThat(services.get(1).getMetadata().getLabels().get("label"), is(nullValue()));
+        assertThat(services.get(2).getMetadata().getAnnotations(), is(Collections.singletonMap("external-dns.alpha.kubernetes.io/hostname", "broker-2.myingress.com.")));
+        assertThat(services.get(2).getMetadata().getLabels().get("label"), is("label-value"));
     }
 
     @ParallelTest
@@ -1966,28 +2091,41 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check port
         List<ContainerPort> ports = kc.getContainerPortList();
-        assertThat(ports.contains(kc.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, "TCP")), is(true));
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getMetadata().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(ext.getSpec().getType(), is("NodePort"));
         assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
-        assertThat(ext.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-        checkOwnerReference(kc.createOwnerReference(), ext);
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        TestUtils.checkOwnerReference(ext, KAFKA);
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(srv.getSpec().getType(), is("NodePort"));
             assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
-            assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-            checkOwnerReference(kc.createOwnerReference(), srv);
+            assertThat(srv.getSpec().getPorts().size(), is(1));
+            assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+            assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+            assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+            TestUtils.checkOwnerReference(srv, KAFKA);
         }
     }
 
@@ -2008,10 +2146,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check Init container
-        Container initCont = kc.getInitContainers(null).get(0);
+        Container initCont = kc.createInitContainer(null, pools.get(0));
         assertThat(initCont, is(notNullValue()));
         assertThat(initCont.getEnv().stream().filter(env -> KafkaCluster.ENV_VAR_KAFKA_INIT_EXTERNAL_ADDRESS.equals(env.getName()))
                         .map(EnvVar::getValue).findFirst().orElse(""), is("TRUE"));
@@ -2041,32 +2180,51 @@ public class KafkaClusterTest {
                 .endKafka()
             .endSpec()
             .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check port
         List<ContainerPort> ports = kc.getContainerPortList();
-        assertThat(ports.contains(kc.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, "TCP")), is(true));
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getMetadata().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(ext.getSpec().getType(), is("NodePort"));
         assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
-        assertThat(ext.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, 32001, "TCP"))));
-        checkOwnerReference(kc.createOwnerReference(), ext);
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(32001));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+
+        TestUtils.checkOwnerReference(ext, KAFKA);
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(srv.getSpec().getType(), is("NodePort"));
             assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
             if (i == 0) { // pod with index 0 will have overriden port
-                assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, 32101, "TCP"))));
+                assertThat(srv.getSpec().getPorts().size(), is(1));
+                assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+                assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+                assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+                assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(32101));
+                assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
             } else {
-                assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
+                assertThat(srv.getSpec().getPorts().size(), is(1));
+                assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+                assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+                assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+                assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
             }
-            checkOwnerReference(kc.createOwnerReference(), srv);
+            TestUtils.checkOwnerReference(srv, KAFKA);
         }
     }
 
@@ -2097,10 +2255,16 @@ public class KafkaClusterTest {
                 .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, 32189, "TCP"))));
-        assertThat(kc.generateExternalServices(0).get(0).getSpec().getPorts().get(0).getNodePort(), is(32001));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().size(), is(1));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32189));
+        assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        assertThat(kc.generatePerPodServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32001));
 
         assertThat(ListenersUtils.bootstrapNodePort(kc.getListeners().get(0)), is(32189));
         assertThat(ListenersUtils.brokerNodePort(kc.getListeners().get(0), 0), is(32001));
@@ -2130,9 +2294,10 @@ public class KafkaClusterTest {
                 .endKafka()
             .endSpec()
             .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        assertThat(kc.generateExternalServices(0).get(0).getSpec().getPorts().get(0).getNodePort(), is(32101));
+        assertThat(kc.generatePerPodServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32101));
         assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32001));
         assertThat(ListenersUtils.bootstrapNodePort(kc.getListeners().get(0)), is(32001));
         assertThat(ListenersUtils.brokerNodePort(kc.getListeners().get(0), 0), is(32101));
@@ -2163,9 +2328,11 @@ public class KafkaClusterTest {
                 .endKafka()
             .endSpec()
             .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
 
-        assertThat(kc.generateExternalServices(0).get(0).getSpec().getPorts().get(0).getNodePort(), is(32101));
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        assertThat(kc.generatePerPodServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32101));
         assertThat(kc.generateExternalBootstrapServices().get(0).getSpec().getPorts().get(0).getNodePort(), is(32001));
 
         assertThat(ListenersUtils.bootstrapNodePort(kc.getListeners().get(0)), is(32001));
@@ -2181,7 +2348,7 @@ public class KafkaClusterTest {
                 "foo-kafka-1.crt", "foo-kafka-1.key", "foo-kafka-1.p12", "foo-kafka-1.password",
                 "foo-kafka-2.crt", "foo-kafka-2.key", "foo-kafka-2.p12", "foo-kafka-2.password")));
         X509Certificate cert = Ca.cert(secret, "foo-kafka-0.crt");
-        assertThat(cert.getSubjectDN().getName(), is("CN=foo-kafka, O=io.strimzi"));
+        assertThat(cert.getSubjectX500Principal().getName(), is("CN=foo-kafka,O=io.strimzi"));
         assertThat(new HashSet<Object>(cert.getSubjectAlternativeNames()), is(set(
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc.cluster.local"),
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc"),
@@ -2193,7 +2360,6 @@ public class KafkaClusterTest {
                 asList(2, "foo-kafka-brokers.test"),
                 asList(2, "foo-kafka-brokers.test.svc"),
                 asList(2, "foo-kafka-brokers.test.svc.cluster.local"))));
-
     }
 
     @ParallelTest
@@ -2209,7 +2375,7 @@ public class KafkaClusterTest {
                 "foo-kafka-1.crt", "foo-kafka-1.key", "foo-kafka-1.p12", "foo-kafka-1.password",
                 "foo-kafka-2.crt", "foo-kafka-2.key", "foo-kafka-2.p12", "foo-kafka-2.password")));
         X509Certificate cert = Ca.cert(secret, "foo-kafka-0.crt");
-        assertThat(cert.getSubjectDN().getName(), is("CN=foo-kafka, O=io.strimzi"));
+        assertThat(cert.getSubjectX500Principal().getName(), is("CN=foo-kafka,O=io.strimzi"));
         assertThat(new HashSet<Object>(cert.getSubjectAlternativeNames()), is(set(
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc.cluster.local"),
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc"),
@@ -2238,7 +2404,7 @@ public class KafkaClusterTest {
                 "foo-kafka-1.crt", "foo-kafka-1.key", "foo-kafka-1.p12", "foo-kafka-1.password",
                 "foo-kafka-2.crt", "foo-kafka-2.key", "foo-kafka-2.p12", "foo-kafka-2.password")));
         X509Certificate cert = Ca.cert(secret, "foo-kafka-0.crt");
-        assertThat(cert.getSubjectDN().getName(), is("CN=foo-kafka, O=io.strimzi"));
+        assertThat(cert.getSubjectX500Principal().getName(), is("CN=foo-kafka,O=io.strimzi"));
         assertThat(new HashSet<Object>(cert.getSubjectAlternativeNames()), is(set(
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc.cluster.local"),
                 asList(2, "foo-kafka-0.foo-kafka-brokers.test.svc"),
@@ -2260,14 +2426,12 @@ public class KafkaClusterTest {
     public void testControlPlanePortNetworkPolicy() {
         NetworkPolicyPeer kafkaBrokersPeer = new NetworkPolicyPeerBuilder()
                 .withNewPodSelector()
-                    .withMatchLabels(Collections.singletonMap(Labels.STRIMZI_NAME_LABEL, KafkaResources.kafkaStatefulSetName(CLUSTER)))
+                    .withMatchLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, CLUSTER, Labels.STRIMZI_NAME_LABEL, KafkaResources.kafkaStatefulSetName(CLUSTER)))
                 .endPodSelector()
                 .build();
 
-        KafkaCluster k = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-
         // Check Network Policies => Different namespace
-        NetworkPolicy np = k.generateNetworkPolicy("operator-namespace", null);
+        NetworkPolicy np = KC.generateNetworkPolicy("operator-namespace", null);
 
         assertThat(np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(KafkaCluster.CONTROLPLANE_PORT))).findFirst().orElse(null), is(notNullValue()));
 
@@ -2281,7 +2445,7 @@ public class KafkaClusterTest {
     public void testReplicationPortNetworkPolicy() {
         NetworkPolicyPeer kafkaBrokersPeer = new NetworkPolicyPeerBuilder()
                 .withNewPodSelector()
-                    .withMatchLabels(Collections.singletonMap(Labels.STRIMZI_NAME_LABEL, KafkaResources.kafkaStatefulSetName(CLUSTER)))
+                    .withMatchLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, CLUSTER, Labels.STRIMZI_NAME_LABEL, KafkaResources.kafkaStatefulSetName(CLUSTER)))
                 .endPodSelector()
                 .build();
 
@@ -2325,10 +2489,8 @@ public class KafkaClusterTest {
                 .endNamespaceSelector()
                 .build();
 
-        KafkaCluster k = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-
         // Check Network Policies => Different namespace
-        NetworkPolicy np = k.generateNetworkPolicy("operator-namespace", null);
+        NetworkPolicy np = KC.generateNetworkPolicy("operator-namespace", null);
 
         assertThat(np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(KafkaCluster.REPLICATION_PORT))).findFirst().orElse(null), is(notNullValue()));
 
@@ -2342,7 +2504,7 @@ public class KafkaClusterTest {
         assertThat(rules.contains(clusterOperatorPeer), is(true));
 
         // Check Network Policies => Same namespace
-        np = k.generateNetworkPolicy(NAMESPACE, null);
+        np = KC.generateNetworkPolicy(NAMESPACE, null);
 
         assertThat(np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(KafkaCluster.REPLICATION_PORT))).findFirst().orElse(null), is(notNullValue()));
 
@@ -2356,7 +2518,7 @@ public class KafkaClusterTest {
         assertThat(rules.contains(clusterOperatorPeerSameNamespace), is(true));
 
         // Check Network Policies => Namespace with Labels
-        np = k.generateNetworkPolicy("operator-namespace", Labels.fromMap(Collections.singletonMap("nsLabelKey", "nsLabelValue")));
+        np = KC.generateNetworkPolicy("operator-namespace", Labels.fromMap(Collections.singletonMap("nsLabelKey", "nsLabelValue")));
 
         assertThat(np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(KafkaCluster.REPLICATION_PORT))).findFirst().orElse(null), is(notNullValue()));
 
@@ -2411,10 +2573,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster k = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check Network Policies
-        NetworkPolicy np = k.generateNetworkPolicy(null, null);
+        NetworkPolicy np = kc.generateNetworkPolicy(null, null);
 
         List<NetworkPolicyIngressRule> rules = np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(9092))).collect(Collectors.toList());
         assertThat(rules.size(), is(1));
@@ -2457,10 +2620,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster k = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check Network Policies
-        NetworkPolicy np = k.generateNetworkPolicy(null, null);
+        NetworkPolicy np = kc.generateNetworkPolicy(null, null);
 
         List<NetworkPolicyIngressRule> rules = np.getSpec().getIngress().stream().filter(ing -> ing.getPorts().get(0).getPort().equals(new IntOrString(9092))).collect(Collectors.toList());
         assertThat(rules.size(), is(1));
@@ -2476,85 +2640,20 @@ public class KafkaClusterTest {
     }
 
     @ParallelTest
-    public void testPodDisruptionBudget() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .editSpec()
-                    .editKafka()
-                    .withNewTemplate()
-                        .withNewPodDisruptionBudget()
-                            .withMaxUnavailable(2)
-                        .endPodDisruptionBudget()
-                    .endTemplate()
-                    .endKafka()
-                .endSpec()
-                .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        PodDisruptionBudget pdb = kc.generatePodDisruptionBudget();
-        assertThat(pdb.getSpec().getMaxUnavailable(), is(new IntOrString(2)));
-    }
-
-    @ParallelTest
-    public void testPodDisruptionBudgetV1Beta1() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .editSpec()
-                    .editKafka()
-                    .withNewTemplate()
-                        .withNewPodDisruptionBudget()
-                            .withMaxUnavailable(2)
-                        .endPodDisruptionBudget()
-                    .endTemplate()
-                    .endKafka()
-                .endSpec()
-                .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kc.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getSpec().getMaxUnavailable(), is(new IntOrString(2)));
-    }
-
-    @ParallelTest
-    public void testDefaultPodDisruptionBudget() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        PodDisruptionBudget pdb = kc.generatePodDisruptionBudget();
-        assertThat(pdb.getSpec().getMaxUnavailable(), is(new IntOrString(1)));
-    }
-
-    @ParallelTest
-    public void testDefaultPodDisruptionBudgetV1Beta1() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kc.generatePodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getSpec().getMaxUnavailable(), is(new IntOrString(1)));
-    }
-
-    @ParallelTest
-    public void testDefaultCustomControllerPodDisruptionBudget()   {
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        PodDisruptionBudget pdb = kc.generateCustomControllerPodDisruptionBudget();
+    public void testDefaultPodDisruptionBudget()   {
+        PodDisruptionBudget pdb = KC.generatePodDisruptionBudget();
         assertThat(pdb.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER)));
         assertThat(pdb.getSpec().getMaxUnavailable(), is(nullValue()));
         assertThat(pdb.getSpec().getMinAvailable().getIntVal(), is(2));
-        assertThat(pdb.getSpec().getSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
-
-        io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdbV1Beta1 = kc.generateCustomControllerPodDisruptionBudgetV1Beta1();
-        assertThat(pdbV1Beta1.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER)));
-        assertThat(pdbV1Beta1.getSpec().getMaxUnavailable(), is(nullValue()));
-        assertThat(pdbV1Beta1.getSpec().getMinAvailable().getIntVal(), is(2));
-        assertThat(pdbV1Beta1.getSpec().getSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
+        assertThat(pdb.getSpec().getSelector().getMatchLabels(), is(KC.getSelectorLabels().toMap()));
     }
 
     @ParallelTest
-    public void testCustomizedCustomControllerPodDisruptionBudget()   {
+    public void testCustomizedPodDisruptionBudget()   {
         Map<String, String> pdbLabels = TestUtils.map("l1", "v1", "l2", "v2");
         Map<String, String> pdbAnnos = TestUtils.map("a1", "v1", "a2", "v2");
 
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withNewTemplate()
@@ -2570,8 +2669,9 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        PodDisruptionBudget pdb = kc.generateCustomControllerPodDisruptionBudget();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        PodDisruptionBudget pdb = kc.generatePodDisruptionBudget();
 
         assertThat(pdb.getMetadata().getLabels().entrySet().containsAll(pdbLabels.entrySet()), is(true));
         assertThat(pdb.getMetadata().getAnnotations().entrySet().containsAll(pdbAnnos.entrySet()), is(true));
@@ -2609,13 +2709,12 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         List<Service> services = new ArrayList<>();
         services.addAll(kc.generateExternalBootstrapServices());
-        services.addAll(kc.generateExternalServices(0));
-        services.addAll(kc.generateExternalServices(1));
-        services.addAll(kc.generateExternalServices(2));
+        services.addAll(kc.generatePerPodServices());
 
         for (Service svc : services)    {
             assertThat(svc.getSpec().getIpFamilyPolicy(), is("PreferDualStack"));
@@ -2656,7 +2755,8 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         assertThat(ListenersUtils.brokerAdvertisedPort(kc.getListeners().get(0), 0), is(10000));
         assertThat(ListenersUtils.brokerAdvertisedHost(kc.getListeners().get(0), 0), is("my-host-0.cz"));
@@ -2672,18 +2772,19 @@ public class KafkaClusterTest {
     public void testGetExternalServiceWithoutAdvertisedHostAndPortOverride() {
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
-                    .editKafka()
-                        .withListeners(new GenericKafkaListenerBuilder()
-                                .withName("external")
-                                .withPort(9094)
-                                .withType(KafkaListenerType.NODEPORT)
-                                .withTls(true)
-                                .build())
-                    .endKafka()
+                .editKafka()
+                .withListeners(new GenericKafkaListenerBuilder()
+                        .withName("external")
+                        .withPort(9094)
+                        .withType(KafkaListenerType.NODEPORT)
+                        .withTls(true)
+                        .build())
+                .endKafka()
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         assertThat(ListenersUtils.brokerAdvertisedPort(kc.getListeners().get(0), 0), is(nullValue()));
         assertThat(ListenersUtils.brokerAdvertisedHost(kc.getListeners().get(0), 0), is(nullValue()));
@@ -2693,66 +2794,6 @@ public class KafkaClusterTest {
 
         assertThat(ListenersUtils.brokerAdvertisedPort(kc.getListeners().get(0), 2), is(nullValue()));
         assertThat(ListenersUtils.brokerAdvertisedHost(kc.getListeners().get(0), 2), is(nullValue()));
-    }
-
-    @ParallelTest
-    public void testGetExternalAdvertisedUrlWithOverrides() {
-        GenericKafkaListenerConfigurationBroker nodePortListenerBrokerConfig0 = new GenericKafkaListenerConfigurationBroker();
-        nodePortListenerBrokerConfig0.setBroker(0);
-        nodePortListenerBrokerConfig0.setAdvertisedHost("my-host-0.cz");
-        nodePortListenerBrokerConfig0.setAdvertisedPort(10000);
-
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .editSpec()
-                    .editKafka()
-                        .withListeners(new GenericKafkaListenerBuilder()
-                                .withName("external")
-                                .withPort(9094)
-                                .withType(KafkaListenerType.NODEPORT)
-                                .withTls(true)
-                                .withNewConfiguration()
-                                    .withBrokers(nodePortListenerBrokerConfig0)
-                                .endConfiguration()
-                                .build())
-                    .endKafka()
-                .endSpec()
-                .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 0, "some-host.com"), is("my-host-0.cz"));
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 0, ""), is("my-host-0.cz"));
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 1, "some-host.com"), is("some-host.com"));
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 1, ""), is(""));
-
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 0, 12345), is("10000"));
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 0, 12345), is("10000"));
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 1, 12345), is("12345"));
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 1, 12345), is("12345"));
-    }
-
-    @ParallelTest
-    public void testGetExternalAdvertisedUrlWithoutOverrides() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
-                .editSpec()
-                    .editKafka()
-                        .withListeners(new GenericKafkaListenerBuilder()
-                                .withName("external")
-                                .withPort(9094)
-                                .withType(KafkaListenerType.NODEPORT)
-                                .withTls(true)
-                                .build())
-                    .endKafka()
-                .endSpec()
-                .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 0, "some-host.com"), is("some-host.com"));
-        assertThat(kc.getAdvertisedHostname(kc.getListeners().get(0), 0, ""), is(""));
-
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 0, 12345), is("12345"));
-        assertThat(kc.getAdvertisedPort(kc.getListeners().get(0), 0, 12345), is("12345"));
     }
 
     @ParallelTest
@@ -2786,10 +2827,11 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
 
         assertThat(pvcs.size(), is(6));
 
@@ -2811,7 +2853,9 @@ public class KafkaClusterTest {
                     .endKafka()
                     .endSpec()
                     .build();
-            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
         });
     }
 
@@ -2830,7 +2874,9 @@ public class KafkaClusterTest {
                     .endKafka()
                     .endSpec()
                     .build();
-            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, oldStorage, REPLICAS, false);
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", oldStorage),
+                Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", IntStream.range(0, REPLICAS).mapToObj(i -> kafkaAssembly.getMetadata().getName() + "-kafka-" + i).toList()), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
         });
     }
 
@@ -2845,7 +2891,7 @@ public class KafkaClusterTest {
 
         Storage persistent = new PersistentClaimStorageBuilder().withStorageClass("gp2-ssd").withDeleteClaim(false).withId(0).withSize("100Gi").build();
 
-        // Test Storage changes and how the are reverted
+        // Test Storage changes and how they are reverted
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
@@ -2855,10 +2901,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, ephemeral, REPLICAS, false);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", ephemeral),
+            Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", IntStream.range(0, REPLICAS).mapToObj(i -> CLUSTER + "-kafka-" + i).toList()), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Storage is reverted
-        assertThat(kc.getStorage(), is(ephemeral));
+        assertThat(kc.getStorageByPoolName(), is(Map.of("kafka", ephemeral)));
 
         // Warning status condition is set
         assertThat(kc.getWarningConditions().size(), is(1));
@@ -2872,10 +2920,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, persistent, REPLICAS, false);
+        pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", persistent),
+            Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", IntStream.range(0, REPLICAS).mapToObj(i -> CLUSTER + "-kafka-" + i).toList()), false, SHARED_ENV_PROVIDER);
+        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Storage is reverted
-        assertThat(kc.getStorage(), is(persistent));
+        assertThat(kc.getStorageByPoolName(), is(Map.of("kafka", persistent)));
 
         // Warning status condition is set
         assertThat(kc.getWarningConditions().size(), is(1));
@@ -2889,10 +2939,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, jbod, REPLICAS, false);
+        pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", jbod),
+            Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", IntStream.range(0, REPLICAS).mapToObj(i -> CLUSTER + "-kafka-" + i).toList()), false, SHARED_ENV_PROVIDER);
+        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Storage is reverted
-        assertThat(kc.getStorage(), is(jbod));
+        assertThat(kc.getStorageByPoolName(), is(Map.of("kafka", jbod)));
 
         // Warning status condition is set
         assertThat(kc.getWarningConditions().size(), is(1));
@@ -2906,10 +2958,12 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS, jbod, REPLICAS, false);
+        pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", jbod),
+            Map.of(kafkaAssembly.getMetadata().getName() + "-kafka", IntStream.range(0, REPLICAS).mapToObj(i -> CLUSTER + "-kafka-" + i).toList()), false, SHARED_ENV_PROVIDER);
+        kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Storage is reverted
-        assertThat(kc.getStorage(), is(jbod));
+        assertThat(kc.getStorageByPoolName(), is(Map.of("kafka", jbod)));
 
         // Warning status condition is set
         assertThat(kc.getWarningConditions().size(), is(1));
@@ -2960,30 +3014,43 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         assertThat(kc.isExposedWithIngress(), is(true));
 
         // Check port
         List<ContainerPort> ports = kc.getContainerPortList();
-        assertThat(ports.contains(kc.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, "TCP")), is(true));
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
 
         // Check external bootstrap service
         Service ext = kc.generateExternalBootstrapServices().get(0);
         assertThat(ext.getMetadata().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(ext.getSpec().getType(), is("ClusterIP"));
         assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
-        assertThat(ext.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-        checkOwnerReference(kc.createOwnerReference(), ext);
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        TestUtils.checkOwnerReference(ext, KAFKA);
 
         // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Service srv = kc.generateExternalServices(i).get(0);
+            Service srv = services.get(i);
             assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(srv.getSpec().getType(), is("ClusterIP"));
             assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
-            assertThat(srv.getSpec().getPorts(), is(Collections.singletonList(kc.createServicePort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094, 9094, "TCP"))));
-            checkOwnerReference(kc.createOwnerReference(), srv);
+            assertThat(srv.getSpec().getPorts().size(), is(1));
+            assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+            assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+            assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+            TestUtils.checkOwnerReference(srv, KAFKA);
         }
 
         // Check bootstrap ingress
@@ -3001,27 +3068,13 @@ public class KafkaClusterTest {
         assertThat(bing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getPath(), is("/"));
         assertThat(bing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getService().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
         assertThat(bing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getService().getPort().getNumber(), is(9094));
-        checkOwnerReference(kc.createOwnerReference(), bing);
-
-        io.fabric8.kubernetes.api.model.networking.v1beta1.Ingress bingV1Beta1 = kc.generateExternalBootstrapIngressesV1Beta1().get(0);
-        assertThat(bingV1Beta1.getMetadata().getName(), is(KafkaResources.bootstrapServiceName(CLUSTER)));
-        assertThat(bingV1Beta1.getSpec().getIngressClassName(), is(nullValue()));
-        assertThat(bingV1Beta1.getMetadata().getAnnotations().get("dns-annotation"), is("my-kafka-bootstrap.com"));
-        assertThat(bingV1Beta1.getMetadata().getLabels().get("label"), is("label-value"));
-        assertThat(bingV1Beta1.getSpec().getTls().size(), is(1));
-        assertThat(bingV1Beta1.getSpec().getTls().get(0).getHosts().size(), is(1));
-        assertThat(bingV1Beta1.getSpec().getTls().get(0).getHosts().get(0), is("my-kafka-bootstrap.com"));
-        assertThat(bingV1Beta1.getSpec().getRules().size(), is(1));
-        assertThat(bingV1Beta1.getSpec().getRules().get(0).getHost(), is("my-kafka-bootstrap.com"));
-        assertThat(bingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().size(), is(1));
-        assertThat(bingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getPath(), is("/"));
-        assertThat(bingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getServiceName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
-        assertThat(bingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getServicePort(), is(new IntOrString(9094)));
-        checkOwnerReference(kc.createOwnerReference(), bingV1Beta1);
+        TestUtils.checkOwnerReference(bing, KAFKA);
 
         // Check per pod ingress
+        List<Ingress> ingresses = kc.generateExternalIngresses();
+
         for (int i = 0; i < REPLICAS; i++)  {
-            Ingress ing = kc.generateExternalIngresses(i).get(0);
+            Ingress ing = ingresses.get(i);
             assertThat(ing.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(ing.getSpec().getIngressClassName(), is(nullValue()));
             assertThat(ing.getMetadata().getAnnotations().get("dns-annotation"), is("my-kafka-broker.com"));
@@ -3035,23 +3088,7 @@ public class KafkaClusterTest {
             assertThat(ing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getPath(), is("/"));
             assertThat(ing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getService().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
             assertThat(ing.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getService().getPort().getNumber(), is(9094));
-            checkOwnerReference(kc.createOwnerReference(), ing);
-
-            io.fabric8.kubernetes.api.model.networking.v1beta1.Ingress ingV1Beta1 = kc.generateExternalIngressesV1Beta1(i).get(0);
-            assertThat(ingV1Beta1.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
-            assertThat(ingV1Beta1.getSpec().getIngressClassName(), is(nullValue()));
-            assertThat(ingV1Beta1.getMetadata().getAnnotations().get("dns-annotation"), is("my-kafka-broker.com"));
-            assertThat(ingV1Beta1.getMetadata().getLabels().get("label"), is("label-value"));
-            assertThat(ingV1Beta1.getSpec().getTls().size(), is(1));
-            assertThat(ingV1Beta1.getSpec().getTls().get(0).getHosts().size(), is(1));
-            assertThat(ingV1Beta1.getSpec().getTls().get(0).getHosts().get(0), is(String.format("my-broker-kafka-%d.com", i)));
-            assertThat(ingV1Beta1.getSpec().getRules().size(), is(1));
-            assertThat(ingV1Beta1.getSpec().getRules().get(0).getHost(), is(String.format("my-broker-kafka-%d.com", i)));
-            assertThat(ingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().size(), is(1));
-            assertThat(ingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getPath(), is("/"));
-            assertThat(ingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getServiceName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
-            assertThat(ingV1Beta1.getSpec().getRules().get(0).getHttp().getPaths().get(0).getBackend().getServicePort(), is(new IntOrString(9094)));
-            checkOwnerReference(kc.createOwnerReference(), ingV1Beta1);
+            TestUtils.checkOwnerReference(ing, KAFKA);
         }
     }
 
@@ -3081,7 +3118,7 @@ public class KafkaClusterTest {
                                 .withType(KafkaListenerType.INGRESS)
                                 .withTls(true)
                                 .withNewConfiguration()
-                                    .withIngressClass("nginx-internal")
+                                    .withControllerClass("nginx-internal")
                                     .withNewBootstrap()
                                         .withHost("my-kafka-bootstrap.com")
                                         .withAnnotations(Collections.singletonMap("dns-annotation", "my-kafka-bootstrap.com"))
@@ -3093,22 +3130,19 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
          // Check bootstrap ingress
         Ingress bing = kc.generateExternalBootstrapIngresses().get(0);
         assertThat(bing.getSpec().getIngressClassName(), is("nginx-internal"));
 
-        io.fabric8.kubernetes.api.model.networking.v1beta1.Ingress bingV1Beta1 = kc.generateExternalBootstrapIngressesV1Beta1().get(0);
-        assertThat(bingV1Beta1.getSpec().getIngressClassName(), is("nginx-internal"));
-
         // Check per pod ingress
-        for (int i = 0; i < REPLICAS; i++)  {
-            Ingress ing = kc.generateExternalIngresses(i).get(0);
-            assertThat(ing.getSpec().getIngressClassName(), is("nginx-internal"));
+        List<Ingress> ingresses = kc.generateExternalIngresses();
 
-            io.fabric8.kubernetes.api.model.networking.v1beta1.Ingress ingV1Beta1 = kc.generateExternalIngressesV1Beta1(i).get(0);
-            assertThat(ingV1Beta1.getSpec().getIngressClassName(), is("nginx-internal"));
+        for (int i = 0; i < REPLICAS; i++)  {
+            Ingress ing = ingresses.get(i);
+            assertThat(ing.getSpec().getIngressClassName(), is("nginx-internal"));
         }
     }
 
@@ -3127,7 +3161,7 @@ public class KafkaClusterTest {
                                 .withType(KafkaListenerType.INGRESS)
                                 .withTls(true)
                                 .withNewConfiguration()
-                                    .withIngressClass("nginx-internal")
+                                    .withControllerClass("nginx-internal")
                                     .withNewBootstrap()
                                         .withHost("my-kafka-bootstrap.com")
                                         .withAnnotations(Collections.singletonMap("dns-annotation", "my-kafka-bootstrap.com"))
@@ -3139,9 +3173,118 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        assertThrows(InvalidResourceException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS));
+        assertThrows(InvalidResourceException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
     }
 
+
+    @ParallelTest
+    public void testClusterIP() {
+        GenericKafkaListenerConfigurationBroker broker0 = new GenericKafkaListenerConfigurationBrokerBuilder()
+                .withAdvertisedHost("my-ingress.com")
+                .withAdvertisedPort(9990)
+                .withLabels(Collections.singletonMap("label", "label-value"))
+                .withBroker(0)
+                .build();
+
+        GenericKafkaListenerConfigurationBroker broker1 = new GenericKafkaListenerConfigurationBrokerBuilder()
+                .withAdvertisedHost("my-ingress.com")
+                .withAdvertisedPort(9991)
+                .withLabels(Collections.singletonMap("label", "label-value"))
+                .withBroker(1)
+                .build();
+
+        GenericKafkaListenerConfigurationBroker broker2 = new GenericKafkaListenerConfigurationBrokerBuilder()
+                .withAdvertisedHost("my-ingress.com")
+                .withAdvertisedPort(9992)
+                .withLabels(Collections.singletonMap("label", "label-value"))
+                .withBroker(2)
+                .build();
+
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+                .editSpec()
+                .editKafka()
+                .withListeners(new GenericKafkaListenerBuilder()
+                        .withName("external")
+                        .withPort(9094)
+                        .withType(KafkaListenerType.CLUSTER_IP)
+                        .withTls(true)
+                        .withNewConfiguration()
+                        .withBrokers(broker0, broker1, broker2)
+                        .endConfiguration()
+                        .build())
+                .endKafka()
+                .endSpec()
+                .build();
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        assertThat(kc.isExposedWithClusterIP(), is(true));
+
+        // Check port
+        List<ContainerPort> ports = kc.getContainerPortList();
+        assertThat(ports.contains(ContainerUtils.createContainerPort(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME, 9094)), is(true));
+
+        // Check external bootstrap service
+        Service ext = kc.generateExternalBootstrapServices().get(0);
+        assertThat(ext.getMetadata().getName(), is(KafkaResources.externalBootstrapServiceName(CLUSTER)));
+        assertThat(ext.getSpec().getType(), is("ClusterIP"));
+        assertThat(ext.getSpec().getSelector(), is(kc.getSelectorLabels().toMap()));
+        assertThat(ext.getSpec().getPorts().size(), is(1));
+        assertThat(ext.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+        assertThat(ext.getSpec().getPorts().get(0).getPort(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+        assertThat(ext.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+        assertThat(ext.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+        TestUtils.checkOwnerReference(ext, KAFKA);
+
+        // Check per pod services
+        List<Service> services = kc.generatePerPodServices();
+
+        for (int i = 0; i < REPLICAS; i++)  {
+            Service srv = services.get(i);
+            assertThat(srv.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER) + "-" + i));
+            assertThat(srv.getSpec().getType(), is("ClusterIP"));
+            assertThat(srv.getSpec().getSelector().get(Labels.KUBERNETES_STATEFULSET_POD_LABEL), is(KafkaResources.kafkaPodName(CLUSTER, i)));
+            assertThat(srv.getSpec().getPorts().size(), is(1));
+            assertThat(srv.getSpec().getPorts().get(0).getName(), is(ListenersUtils.BACKWARDS_COMPATIBLE_EXTERNAL_PORT_NAME));
+            assertThat(srv.getSpec().getPorts().get(0).getPort(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getTargetPort().getIntVal(), is(9094));
+            assertThat(srv.getSpec().getPorts().get(0).getNodePort(), is(nullValue()));
+            assertThat(srv.getSpec().getPorts().get(0).getProtocol(), is("TCP"));
+            TestUtils.checkOwnerReference(srv, KAFKA);
+        }
+
+    }
+    @ParallelTest
+    public void testClusterIPMissingConfiguration() {
+        GenericKafkaListenerConfigurationBroker broker0 = new GenericKafkaListenerConfigurationBrokerBuilder()
+                .withBroker(0)
+                .build();
+
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+                .editSpec()
+                .editKafka()
+                .withListeners(new GenericKafkaListenerBuilder()
+                        .withName("external")
+                        .withType(KafkaListenerType.CLUSTER_IP)
+                        .withTls(false)
+                        .withNewConfiguration()
+                        .withBrokers(broker0)
+                        .endConfiguration()
+                        .build())
+                .endKafka()
+                .endSpec()
+                .build();
+
+        assertThrows(InvalidResourceException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
+    }
     @ParallelTest
     public void testClusterRoleBindingNodePort() {
         String testNamespace = "other-namespace";
@@ -3164,13 +3307,15 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
         ClusterRoleBinding crb = kc.generateClusterRoleBinding(testNamespace);
 
         assertThat(crb.getMetadata().getName(), is(KafkaResources.initContainerClusterRoleBindingName(CLUSTER, testNamespace)));
         assertThat(crb.getMetadata().getNamespace(), is(nullValue()));
         assertThat(crb.getSubjects().get(0).getNamespace(), is(testNamespace));
-        assertThat(crb.getSubjects().get(0).getName(), is(kc.getServiceAccountName()));
+        assertThat(crb.getSubjects().get(0).getName(), is(kc.componentName));
     }
 
     @ParallelTest
@@ -3188,21 +3333,22 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
         ClusterRoleBinding crb = kc.generateClusterRoleBinding(testNamespace);
 
         assertThat(crb.getMetadata().getName(), is(KafkaResources.initContainerClusterRoleBindingName(CLUSTER, testNamespace)));
         assertThat(crb.getMetadata().getNamespace(), is(nullValue()));
         assertThat(crb.getSubjects().get(0).getNamespace(), is(testNamespace));
-        assertThat(crb.getSubjects().get(0).getName(), is(kc.getServiceAccountName()));
+        assertThat(crb.getSubjects().get(0).getName(), is(kc.componentName));
     }
 
     @ParallelTest
     public void testNullClusterRoleBinding() {
         String testNamespace = "other-namespace";
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        ClusterRoleBinding crb = kc.generateClusterRoleBinding(testNamespace);
+        ClusterRoleBinding crb = KC.generateClusterRoleBinding(testNamespace);
 
         assertThat(crb, is(nullValue()));
     }
@@ -3237,10 +3383,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        List<EnvVar> kafkaEnvVars = kc.getEnvVars();
+        List<EnvVar> kafkaEnvVars = kc.getEnvVars(pools.get(0));
 
         assertThat("Failed to correctly set container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -3254,7 +3400,7 @@ public class KafkaClusterTest {
     @ParallelTest
     public void testKafkaContainerEnvVarsConflict() {
         ContainerEnvVar envVar1 = new ContainerEnvVar();
-        String testEnvOneKey = KafkaCluster.ENV_VAR_KAFKA_JMX_ENABLED;
+        String testEnvOneKey = JmxModel.ENV_VAR_STRIMZI_JMX_ENABLED;
         String testEnvOneValue = "test.env.one";
         envVar1.setName(testEnvOneKey);
         envVar1.setValue(testEnvOneValue);
@@ -3284,10 +3430,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-
-        List<EnvVar> kafkaEnvVars = kc.getEnvVars();
+        List<EnvVar> kafkaEnvVars = kc.getEnvVars(pools.get(0));
 
         assertThat("Failed to prevent over writing existing container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -3300,7 +3446,6 @@ public class KafkaClusterTest {
 
     @ParallelTest
     public void testInitContainerEnvVars() {
-
         ContainerEnvVar envVar1 = new ContainerEnvVar();
         String testEnvOneKey = "TEST_ENV_1";
         String testEnvOneValue = "test.env.one";
@@ -3321,15 +3466,17 @@ public class KafkaClusterTest {
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
-                .editKafka()
-                .withNewTemplate()
-                .withInitContainer(initContainer)
-                .endTemplate()
-                .endKafka()
+                    .editKafka()
+                        .withNewTemplate()
+                            .withInitContainer(initContainer)
+                        .endTemplate()
+                    .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        List<EnvVar> kafkaEnvVars = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS).getInitContainerEnvVars();
+        List<EnvVar> kafkaEnvVars = kafkaCluster.getInitContainerEnvVars(pools.get(0));
 
         assertThat("Failed to correctly set container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -3377,8 +3524,10 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCLuster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        List<EnvVar> kafkaEnvVars = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS).getInitContainerEnvVars();
+        List<EnvVar> kafkaEnvVars = kafkaCLuster.getInitContainerEnvVars(pools.get(0));
 
         assertThat("Failed to prevent over writing existing container environment variable: " + testEnvOneKey,
                 kafkaEnvVars.stream().filter(env -> testEnvOneKey.equals(env.getName()))
@@ -3402,7 +3551,8 @@ public class KafkaClusterTest {
                     .endSpec()
                     .build();
 
-            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
         });
     }
 
@@ -3416,8 +3566,8 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        InvalidResourceException ex = assertThrows(InvalidResourceException.class, () -> KafkaCluster.validateIntConfigProperty(propertyName, kafkaAssembly.getSpec().getKafka()));
-        assertThat(ex.getMessage().equals("Kafka configuration option '" + propertyName + "' should be set to " + REPLICAS + " or less because 'spec.kafka.replicas' is " + REPLICAS), is(true));
+        InvalidResourceException ex = assertThrows(InvalidResourceException.class, () -> KafkaCluster.validateIntConfigProperty(propertyName, kafkaAssembly.getSpec().getKafka(), REPLICAS));
+        assertThat(ex.getMessage(), is("Kafka configuration option '" + propertyName + "' should be set to " + REPLICAS + " or less because this cluster has only " + REPLICAS + " Kafka broker(s)."));
     }
 
     @ParallelTest
@@ -3430,11 +3580,21 @@ public class KafkaClusterTest {
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster.validateIntConfigProperty("offsets.topic.replication.factor", kafkaAssembly.getSpec().getKafka());
+        KafkaCluster.validateIntConfigProperty("offsets.topic.replication.factor", kafkaAssembly.getSpec().getKafka(), REPLICAS);
     }
 
     @ParallelTest
     public void testCruiseControl() {
+        Map<Integer, Map<String, String>> advertisedHostnames = Map.of(
+                0, Map.of("PLAIN_9092", "broker-0", "TLS_9093", "broker-0"),
+                1, Map.of("PLAIN_9092", "broker-1", "TLS_9093", "broker-1"),
+                2, Map.of("PLAIN_9092", "broker-2", "TLS_9093", "broker-2")
+        );
+        Map<Integer, Map<String, String>> advertisedPorts = Map.of(
+                0, Map.of("PLAIN_9092", "9092", "TLS_9093", "10000"),
+                1, Map.of("PLAIN_9092", "9092", "TLS_9093", "10001"),
+                2, Map.of("PLAIN_9092", "9092", "TLS_9093", "10002")
+        );
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
@@ -3442,8 +3602,12 @@ public class KafkaClusterTest {
                 .endCruiseControl()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-        String brokerConfig = kafkaCluster.generateSharedBrokerConfiguration();
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        String brokerConfig = kafkaCluster.generatePerBrokerConfiguration(1, advertisedHostnames, advertisedPorts);
+
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_NUM_PARTITIONS + "=" + 1));
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_REPLICATION_FACTOR + "=" + 1));
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_MIN_ISR + "=" + 1));
@@ -3451,6 +3615,17 @@ public class KafkaClusterTest {
 
     @ParallelTest
     public void testCruiseControlCustomMetricsReporterTopic() {
+        Map<Integer, Map<String, String>> advertisedHostnames = Map.of(
+                0, Map.of("PLAIN_9092", "broker-0", "TLS_9093", "broker-0"),
+                1, Map.of("PLAIN_9092", "broker-1", "TLS_9093", "broker-1"),
+                2, Map.of("PLAIN_9092", "broker-2", "TLS_9093", "broker-2")
+        );
+        Map<Integer, Map<String, String>> advertisedPorts = Map.of(
+                0, Map.of("PLAIN_9092", "9092", "TLS_9093", "10000"),
+                1, Map.of("PLAIN_9092", "9092", "TLS_9093", "10001"),
+                2, Map.of("PLAIN_9092", "9092", "TLS_9093", "10002")
+        );
+
         int replicationFactor = 3;
         int minInsync = 2;
         int partitions = 5;
@@ -3461,15 +3636,17 @@ public class KafkaClusterTest {
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
-                .editKafka()
-                .withConfig(config)
-                .endKafka()
-                .withNewCruiseControl()
-                .endCruiseControl()
+                    .editKafka()
+                        .withConfig(config)
+                    .endKafka()
+                    .withNewCruiseControl()
+                    .endCruiseControl()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-        String brokerConfig = kafkaCluster.generateSharedBrokerConfiguration();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        String brokerConfig = kafkaCluster.generatePerBrokerConfiguration(1, advertisedHostnames, advertisedPorts);
+
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_NUM_PARTITIONS + "=" + partitions));
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_REPLICATION_FACTOR + "=" + replicationFactor));
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_MIN_ISR + "=" + minInsync));
@@ -3477,21 +3654,35 @@ public class KafkaClusterTest {
 
     @ParallelTest
     public void testCruiseControlCustomMetricsReporterTopicMinInsync() {
+        Map<Integer, Map<String, String>> advertisedHostnames = Map.of(
+                0, Map.of("PLAIN_9092", "broker-0", "TLS_9093", "broker-0"),
+                1, Map.of("PLAIN_9092", "broker-1", "TLS_9093", "broker-1"),
+                2, Map.of("PLAIN_9092", "broker-2", "TLS_9093", "broker-2")
+        );
+        Map<Integer, Map<String, String>> advertisedPorts = Map.of(
+                0, Map.of("PLAIN_9092", "9092", "TLS_9093", "10000"),
+                1, Map.of("PLAIN_9092", "9092", "TLS_9093", "10001"),
+                2, Map.of("PLAIN_9092", "9092", "TLS_9093", "10002")
+        );
+
         int minInsync = 1;
         Map<String, Object> config = new HashMap<>();
         config.put(CruiseControlConfigurationParameters.METRICS_TOPIC_MIN_ISR.getValue(), minInsync);
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
-                .editKafka()
-                .withConfig(config)
-                .endKafka()
-                .withNewCruiseControl()
-                .endCruiseControl()
+                    .editKafka()
+                        .withConfig(config)
+                    .endKafka()
+                    .withNewCruiseControl()
+                    .endCruiseControl()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
-        String brokerConfig = kafkaCluster.generateSharedBrokerConfiguration();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+
+        String brokerConfig = kc.generatePerBrokerConfiguration(1, advertisedHostnames, advertisedPorts);
+
         assertThat(brokerConfig, CoreMatchers.containsString(CruiseControlConfigurationParameters.METRICS_TOPIC_MIN_ISR + "=" + minInsync));
     }
 
@@ -3512,9 +3703,15 @@ public class KafkaClusterTest {
                     .endCruiseControl()
                 .endSpec()
                 .build();
-        InvalidResourceException ex = assertThrows(InvalidResourceException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS));
+
+        InvalidResourceException ex = assertThrows(InvalidResourceException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
+
         assertThat(ex.getMessage(), is("Kafka " + NAMESPACE + "/" + CLUSTER + " has invalid configuration. " +
-                "Cruise Control cannot be deployed with a single-node Kafka cluster. It requires at least two Kafka nodes."));
+                "Cruise Control cannot be deployed with a Kafka cluster which has only one broker. " +
+                "It requires at least two Kafka brokers."));
     }
 
     @ParallelTest
@@ -3534,7 +3731,10 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        assertThrows(IllegalArgumentException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS));
+        assertThrows(IllegalArgumentException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
     }
 
     @ParallelTest
@@ -3545,15 +3745,18 @@ public class KafkaClusterTest {
 
         Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
-                .editKafka()
-                .withConfig(config)
-                .endKafka()
-                .withNewCruiseControl()
-                .endCruiseControl()
+                    .editKafka()
+                        .withConfig(config)
+                    .endKafka()
+                    .withNewCruiseControl()
+                    .endCruiseControl()
                 .endSpec()
                 .build();
 
-        assertThrows(IllegalArgumentException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS));
+        assertThrows(IllegalArgumentException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
     }
 
     @ParallelTest
@@ -3572,16 +3775,19 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        assertThat(kc.isMetricsEnabled(), is(true));
-        assertThat(kc.getMetricsConfigInCm(), is(metrics));
+        assertThat(kc.metrics().isEnabled(), is(true));
+        assertThat(kc.metrics().getConfigMapName(), is("my-metrics-configuration"));
+        assertThat(kc.metrics().getConfigMapKey(), is("config.yaml"));
     }
 
     @ParallelTest
     public void testMetricsParsingNoMetrics() {
-        assertThat(KC.isMetricsEnabled(), is(false));
-        assertThat(KC.getMetricsConfigInCm(), is(nullValue()));
+        assertThat(KC.metrics().isEnabled(), is(false));
+        assertThat(KC.metrics().getConfigMapName(), is(nullValue()));
+        assertThat(KC.metrics().getConfigMapKey(), is(nullValue()));
     }
 
     @ParallelTest
@@ -3609,17 +3815,17 @@ public class KafkaClusterTest {
                 .endKafka()
             .endSpec()
             .build();
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-
-        ResourceRequirements initContainersResources = kc.getInitContainers(ImagePullPolicy.IFNOTPRESENT).get(0).getResources();
+        ResourceRequirements initContainersResources = kc.createInitContainer(ImagePullPolicy.IFNOTPRESENT, pools.get(0)).getResources();
         assertThat(initContainersResources.getRequests(), is(requirements));
         assertThat(initContainersResources.getLimits(), is(limits));
     }
 
     @ParallelTest
     public void testInvalidVersion() {
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withVersion("6.6.6")
@@ -3627,14 +3833,17 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS));
+        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
 
         assertThat(exc.getMessage(), containsString("Unsupported Kafka.spec.kafka.version: 6.6.6. Supported versions are:"));
     }
 
     @ParallelTest
     public void testUnsupportedVersion() {
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withVersion("2.6.0")
@@ -3642,14 +3851,17 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS));
+        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
 
         assertThat(exc.getMessage(), containsString("Unsupported Kafka.spec.kafka.version: 2.6.0. Supported versions are:"));
     }
 
     @ParallelTest
     public void testInvalidVersionWithCustomImage() {
-        Kafka kafka = new KafkaBuilder(KAFKA)
+        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withVersion("2.6.0")
@@ -3658,7 +3870,10 @@ public class KafkaClusterTest {
                 .endSpec()
                 .build();
 
-        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS));
+        InvalidResourceException exc = assertThrows(KafkaVersion.UnsupportedKafkaVersionException.class, () -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        });
 
         assertThat(exc.getMessage(), containsString("Unsupported Kafka.spec.kafka.version: 2.6.0. Supported versions are:"));
     }
@@ -3675,16 +3890,16 @@ public class KafkaClusterTest {
                 1, Map.of("PLAIN_9092", "9092", "TLS_9093", "9093"),
                 2, Map.of("PLAIN_9092", "9092", "TLS_9093", "9093")
         );
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS, null, 0, true);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, KAFKA, null, Map.of(), Map.of(), true, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, pools, VERSIONS, true, "my-cluster-id", SHARED_ENV_PROVIDER);
 
         // Test that the broker configuration is with KRaft
-        String config = kc.generatePerBrokerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
+        String config = kc.generatePerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
         assertThat(config, CoreMatchers.containsString("process.roles"));
         assertThat(config, CoreMatchers.containsString("controller.quorum.voters"));
 
         // Test that ClusterID KRaft flag are passed as environment variable
-        List<EnvVar> kafkaEnvVars = kc.getEnvVars();
+        List<EnvVar> kafkaEnvVars = kc.getEnvVars(pools.get(0));
         EnvVar clusterIdEnvVar = kafkaEnvVars.stream().filter(env -> KafkaCluster.ENV_VAR_STRIMZI_CLUSTER_ID.equals(env.getName())).findFirst().orElse(null);
         assertThat(clusterIdEnvVar, is(Matchers.notNullValue()));
         assertThat(clusterIdEnvVar.getValue().isEmpty(), is(false));
@@ -3707,22 +3922,16 @@ public class KafkaClusterTest {
         );
 
         String clusterId = Uuid.randomUuid().toString();
-
-        Kafka existingKafka = new KafkaBuilder(KAFKA)
-                .withNewStatus()
-                    .withClusterId(clusterId)
-                .endStatus()
-                .build();
-
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, existingKafka, VERSIONS, null, 0, true);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, KAFKA, null, Map.of(), Map.of(), true, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, pools, VERSIONS, true, clusterId, SHARED_ENV_PROVIDER);
 
         // Test that the broker configuration is with KRaft
-        String config = kc.generatePerBrokerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
+        String config = kc.generatePerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
         assertThat(config, CoreMatchers.containsString("process.roles"));
         assertThat(config, CoreMatchers.containsString("controller.quorum.voters"));
 
         // Test that ClusterID and KRaft flag are passed as environment variable
-        List<EnvVar> kafkaEnvVars = kc.getEnvVars();
+        List<EnvVar> kafkaEnvVars = kc.getEnvVars(pools.get(0));
         EnvVar clusterIdEnvVar = kafkaEnvVars.stream().filter(env -> KafkaCluster.ENV_VAR_STRIMZI_CLUSTER_ID.equals(env.getName())).findFirst().orElse(null);
         assertThat(clusterIdEnvVar, is(Matchers.notNullValue()));
         assertThat(clusterIdEnvVar.getValue(), is(clusterId));
@@ -3733,31 +3942,63 @@ public class KafkaClusterTest {
 
     @ParallelTest
     public void withAffinityWithoutRack() throws IOException {
-        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, versions), this.getClass().getSimpleName() + ".withAffinityWithoutRack");
-        resourceTester.assertDesiredResource(".yaml", KafkaCluster::getMergedAffinity);
+        AtomicReference<KafkaPool> pool = new AtomicReference<>();
+
+        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            pool.set(pools.get(0));
+            return KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, pools, versions, false, null, SHARED_ENV_PROVIDER);
+        }, this.getClass().getSimpleName() + ".withAffinityWithoutRack");
+
+        resourceTester.assertDesiredModel(".yaml", model -> model.getMergedAffinity(pool.get()));
     }
 
     @ParallelTest
     public void withRackWithoutAffinity() throws IOException {
-        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, versions), this.getClass().getSimpleName() + ".withRackWithoutAffinity");
-        resourceTester.assertDesiredResource(".yaml", KafkaCluster::getMergedAffinity);
+        AtomicReference<KafkaPool> pool = new AtomicReference<>();
+
+        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            pool.set(pools.get(0));
+            return KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, pools, versions, false, null, SHARED_ENV_PROVIDER);
+        }, this.getClass().getSimpleName() + ".withRackWithoutAffinity");
+
+        resourceTester.assertDesiredModel(".yaml", model -> model.getMergedAffinity(pool.get()));
     }
 
     @ParallelTest
     public void withRackAndAffinityWithMoreTerms() throws IOException {
-        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, versions), this.getClass().getSimpleName() + ".withRackAndAffinityWithMoreTerms");
-        resourceTester.assertDesiredResource(".yaml", KafkaCluster::getMergedAffinity);
+        AtomicReference<KafkaPool> pool = new AtomicReference<>();
+
+        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            pool.set(pools.get(0));
+            return KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, pools, versions, false, null, SHARED_ENV_PROVIDER);
+        }, this.getClass().getSimpleName() + ".withRackAndAffinityWithMoreTerms");
+
+        resourceTester.assertDesiredModel(".yaml", model -> model.getMergedAffinity(pool.get()));
     }
 
     @ParallelTest
     public void withRackAndAffinity() throws IOException {
-        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, versions), this.getClass().getSimpleName() + ".withRackAndAffinity");
-        resourceTester.assertDesiredResource(".yaml", KafkaCluster::getMergedAffinity);
+        AtomicReference<KafkaPool> pool = new AtomicReference<>();
+
+        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            pool.set(pools.get(0));
+            return KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, pools, versions, false, null, SHARED_ENV_PROVIDER);
+        }, this.getClass().getSimpleName() + ".withRackAndAffinity");
+
+        resourceTester.assertDesiredModel(".yaml", model -> model.getMergedAffinity(pool.get()));
     }
 
     @ParallelTest
     public void withTolerations() throws IOException {
-        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, versions), this.getClass().getSimpleName() + ".withTolerations");
-        resourceTester.assertDesiredResource(".yaml", AbstractModel::getTolerations);
+        ResourceTester<Kafka, KafkaCluster> resourceTester = new ResourceTester<>(Kafka.class, VERSIONS, (kafkaAssembly1, versions) -> {
+            List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+            return KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly1, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        }, this.getClass().getSimpleName() + ".withTolerations");
+
+        resourceTester.assertDesiredResource(".yaml", cr -> cr.getSpec().getKafka().getTemplate().getPod().getTolerations());
     }
 }

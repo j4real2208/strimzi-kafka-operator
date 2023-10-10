@@ -8,15 +8,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.zjsonpatch.JsonDiff;
+import io.strimzi.operator.cluster.model.Quantities;
 import io.strimzi.operator.cluster.model.StorageUtils;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
-import io.strimzi.operator.common.operator.resource.AbstractJsonDiff;
+import io.strimzi.operator.common.model.AbstractJsonDiff;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Class for diffing StatefulSets
+ */
 public class StatefulSetDiff extends AbstractJsonDiff {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(StatefulSetDiff.class.getName());
 
@@ -24,6 +28,10 @@ public class StatefulSetDiff extends AbstractJsonDiff {
 
     private static final Pattern IGNORABLE_PATHS = Pattern.compile(
         "^(/metadata/managedFields"
+        + "|/metadata/creationTimestamp"
+        + "|/metadata/resourceVersion"
+        + "|/metadata/generation"
+        + "|/metadata/uid"
         + "|/spec/revisionHistoryLimit"
         + "|/spec/template/metadata/annotations/" + SHORTENED_STRIMZI_DOMAIN + "~1generation"
         + "|/spec/template/spec/initContainers/[0-9]+/resources"
@@ -66,6 +74,13 @@ public class StatefulSetDiff extends AbstractJsonDiff {
     private final boolean changesLabels;
     private final boolean changesSpecReplicas;
 
+    /**
+     * Constructor
+     *
+     * @param reconciliation    Reconciliation marker
+     * @param current           Current StatefulSet
+     * @param desired           Desired StatefulSet
+     */
     public StatefulSetDiff(Reconciliation reconciliation, StatefulSet current, StatefulSet desired) {
         JsonNode source = PATCH_MAPPER.valueToTree(current);
         JsonNode target = PATCH_MAPPER.valueToTree(desired);
@@ -138,14 +153,10 @@ public class StatefulSetDiff extends AbstractJsonDiff {
             && !t.isMissingNode()) {
             if ("cpu".equals(group)) {
                 // Ignore single millicpu differences as they could be due to rounding error
-                if (Math.abs(Quantities.parseCpuAsMilliCpus(s.asText()) - Quantities.parseCpuAsMilliCpus(t.asText())) < 1) {
-                    return true;
-                }
+                return Math.abs(Quantities.parseCpuAsMilliCpus(s.asText()) - Quantities.parseCpuAsMilliCpus(t.asText())) < 1;
             } else {
                 // Ignore single byte differences as they could be due to rounding error
-                if (Math.abs(Quantities.parseMemory(s.asText()) - Quantities.parseMemory(t.asText())) < 1) {
-                    return true;
-                }
+                return Math.abs(Quantities.parseMemory(s.asText()) - Quantities.parseMemory(t.asText())) < 1;
             }
         }
         return false;

@@ -4,36 +4,39 @@
  */
 package io.strimzi.operator.cluster.operator.resource.cruisecontrol;
 
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlEndpoints;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlParameters;
+
 import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * Builds the path to the Cruise Control APi
+ */
 public class PathBuilder {
 
     String constructedPath;
     boolean firstParam;
 
+    /**
+     * Constructor
+     *
+     * @param endpoint  Cruise Control endpoint
+     */
     public PathBuilder(CruiseControlEndpoints endpoint) {
-        constructedPath = endpoint.path + "?";
+        constructedPath = endpoint + "?";
         firstParam = true;
     }
 
-    public PathBuilder withParameter(String parameter) {
-        if (!firstParam) {
-            constructedPath += "&";
-        } else {
-            firstParam = false;
-        }
-        try {
-            constructedPath += URLEncoder.encode(parameter, StandardCharsets.UTF_8.toString());
-        } catch (UnsupportedEncodingException e) {
-            throw new RuntimeException(e.getMessage());
-        }
-        return this;
-    }
-
+    /**
+     * Adds parameter with value to the path
+     *
+     * @param param     Cruise Control parameter
+     * @param value     Parameter value
+     *
+     * @return  Instance of this builder
+     */
     public PathBuilder withParameter(CruiseControlParameters param, String value) {
         if (!firstParam) {
             constructedPath += "&";
@@ -48,6 +51,14 @@ public class PathBuilder {
         return this;
     }
 
+    /**
+     * Adds parameter with multiple values to the path
+     *
+     * @param param     Cruise Control parameter
+     * @param values    List of parameter value
+     *
+     * @return  Instance of this builder
+     */
     public PathBuilder withParameter(CruiseControlParameters param, List<String> values) {
         if (!firstParam) {
             constructedPath += "&";
@@ -68,6 +79,13 @@ public class PathBuilder {
         }
     }
 
+    /**
+     * Adds Rebalance parameters to the path
+     *
+     * @param options   Rebalance options
+     *
+     * @return  Instance of this builder
+     */
     public PathBuilder withRebalanceParameters(RebalanceOptions options) {
         if (options != null) {
             PathBuilder builder = withAbstractRebalanceParameters(options)
@@ -105,26 +123,41 @@ public class PathBuilder {
         }
     }
 
+    /**
+     * Adds add-broker options to the path
+     *
+     * @param options   Add broker options
+     *
+     * @return  Instance of this builder
+     */
     public PathBuilder withAddBrokerParameters(AddBrokerOptions options) {
         if (options != null) {
-            PathBuilder builder = withAbstractRebalanceParameters(options)
+            return withAbstractRebalanceParameters(options)
                     .withParameter(CruiseControlParameters.BROKER_ID, options.getBrokers().stream().map(String::valueOf).collect(Collectors.joining(",")));
-            return builder;
         } else {
             return this;
         }
     }
 
+    /**
+     * Adds remove broker options to the path
+     *
+     * @param options   Remove-broker options
+     *
+     * @return  Instance of this builder
+     */
     public PathBuilder withRemoveBrokerParameters(RemoveBrokerOptions options) {
         if (options != null) {
-            PathBuilder builder = withAbstractRebalanceParameters(options)
+            return withAbstractRebalanceParameters(options)
                     .withParameter(CruiseControlParameters.BROKER_ID, options.getBrokers().stream().map(String::valueOf).collect(Collectors.joining(",")));
-            return builder;
         } else {
             return this;
         }
     }
 
+    /**
+     * @return  Builds and returns the path
+     */
     public String build() {
         return constructedPath;
     }

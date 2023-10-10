@@ -10,7 +10,7 @@ import io.fabric8.kubernetes.api.model.rbac.SubjectBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class ClusterRoleBindingTemplates {
@@ -25,46 +25,69 @@ public class ClusterRoleBindingTemplates {
     public static List<ClusterRoleBinding> clusterRoleBindingsForAllNamespaces(String namespace, String coName) {
         LOGGER.info("Creating ClusterRoleBinding that grant cluster-wide access to all OpenShift projects");
 
-        List<ClusterRoleBinding> kCRBList = new ArrayList<>();
-
-        kCRBList.add(
-            new ClusterRoleBindingBuilder()
-                .withNewMetadata()
-                    .withName(coName + "-namespaced")
-                .endMetadata()
-                .withNewRoleRef()
-                    .withApiGroup("rbac.authorization.k8s.io")
-                    .withKind("ClusterRole")
-                    .withName("strimzi-cluster-operator-namespaced")
-                .endRoleRef()
-                .withSubjects(new SubjectBuilder()
-                    .withKind("ServiceAccount")
-                    .withName("strimzi-cluster-operator")
-                    .withNamespace(namespace)
-                    .build()
-                )
-                .build()
-        );
-
-        kCRBList.add(
-            new ClusterRoleBindingBuilder()
-                .withNewMetadata()
-                    .withName(coName + "-entity-operator")
-                .endMetadata()
-                .withNewRoleRef()
-                    .withApiGroup("rbac.authorization.k8s.io")
-                    .withKind("ClusterRole")
-                    .withName("strimzi-entity-operator")
-                .endRoleRef()
-                .withSubjects(new SubjectBuilder()
-                    .withKind("ServiceAccount")
-                    .withName("strimzi-cluster-operator")
-                    .withNamespace(namespace)
-                    .build()
-                )
-                .build()
+        final List<ClusterRoleBinding> kCRBList = Arrays.asList(
+            getClusterOperatorNamespacedCrb(coName, namespace),
+            getClusterOperatorEntityOperatorCrb(coName, namespace),
+            getClusterOperatorWatchedCrb(coName, namespace)
         );
 
         return kCRBList;
+    }
+
+    public static ClusterRoleBinding getClusterOperatorNamespacedCrb(final String coName, final String namespaceName) {
+        return new ClusterRoleBindingBuilder()
+            .withNewMetadata()
+                .withName(coName + "-namespaced")
+            .endMetadata()
+            .withNewRoleRef()
+                .withApiGroup("rbac.authorization.k8s.io")
+                .withKind("ClusterRole")
+                .withName("strimzi-cluster-operator-namespaced")
+            .endRoleRef()
+            .withSubjects(new SubjectBuilder()
+                .withKind("ServiceAccount")
+                .withName("strimzi-cluster-operator")
+                .withNamespace(namespaceName)
+                .build()
+            )
+            .build();
+    }
+
+    public static ClusterRoleBinding getClusterOperatorEntityOperatorCrb(final String coName, final String namespaceName) {
+        return new ClusterRoleBindingBuilder()
+            .withNewMetadata()
+                .withName(coName + "-entity-operator")
+            .endMetadata()
+            .withNewRoleRef()
+                .withApiGroup("rbac.authorization.k8s.io")
+                .withKind("ClusterRole")
+                .withName("strimzi-entity-operator")
+            .endRoleRef()
+            .withSubjects(new SubjectBuilder()
+                .withKind("ServiceAccount")
+                .withName("strimzi-cluster-operator")
+                .withNamespace(namespaceName)
+                .build()
+            )
+            .build();
+    }
+
+    public static ClusterRoleBinding getClusterOperatorWatchedCrb(final String coName, final String namespaceName) {
+        return new ClusterRoleBindingBuilder()
+                .withNewMetadata()
+                    .withName(coName + "-watched")
+                .endMetadata()
+                .withNewRoleRef()
+                    .withApiGroup("rbac.authorization.k8s.io")
+                    .withKind("ClusterRole")
+                    .withName("strimzi-cluster-operator-watched")
+                .endRoleRef()
+                .withSubjects(new SubjectBuilder()
+                    .withKind("ServiceAccount")
+                    .withName("strimzi-cluster-operator")
+                    .withNamespace(namespaceName)
+                    .build()
+                )
+                .build();
     }
 }

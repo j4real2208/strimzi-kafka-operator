@@ -18,9 +18,8 @@ import io.strimzi.systemtest.Environment;
 import io.strimzi.systemtest.resources.ResourceManager;
 import io.strimzi.systemtest.utils.kafkaUtils.KafkaUtils;
 import io.strimzi.test.TestUtils;
-import io.strimzi.test.k8s.KubeClusterResource;
 
-import static io.strimzi.systemtest.resources.ResourceManager.kubeClient;
+import static io.strimzi.test.k8s.KubeClusterResource.kubeClient;
 
 public class KafkaMirrorMaker2Templates {
 
@@ -31,10 +30,10 @@ public class KafkaMirrorMaker2Templates {
         return defaultKafkaMirrorMaker2(kafkaMirrorMaker2, name, targetClusterName, sourceClusterName, kafkaMirrorMaker2Replicas, tlsListener);
     }
 
-    public static KafkaMirrorMaker2Builder kafkaMirrorMaker2WithMetrics(String name, String targetClusterName, String sourceClusterName, int kafkaMirrorMaker2Replicas, String sourceNs, String targetNs) {
+    public static KafkaMirrorMaker2Builder kafkaMirrorMaker2WithMetrics(String namespaceName, String name, String targetClusterName, String sourceClusterName, int kafkaMirrorMaker2Replicas, String sourceNs, String targetNs) {
         KafkaMirrorMaker2 kafkaMirrorMaker2 = getKafkaMirrorMaker2FromYaml(Constants.PATH_TO_KAFKA_MIRROR_MAKER_2_METRICS_CONFIG);
         ConfigMap metricsCm = TestUtils.configMapFromYaml(Constants.PATH_TO_KAFKA_MIRROR_MAKER_2_METRICS_CONFIG, "mirror-maker-2-metrics");
-        KubeClusterResource.kubeClient().getClient().configMaps().inNamespace(kubeClient().getNamespace()).resource(metricsCm).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, metricsCm);
         return defaultKafkaMirrorMaker2(kafkaMirrorMaker2, name, targetClusterName, sourceClusterName, kafkaMirrorMaker2Replicas, false, sourceNs, targetNs);
     }
 
@@ -77,7 +76,6 @@ public class KafkaMirrorMaker2Templates {
             .withNewMetadata()
                 .withName(name)
                 .withNamespace(ResourceManager.kubeClient().getNamespace())
-                .withClusterName(kafkaTargetClusterName)
             .endMetadata()
             .editOrNewSpec()
                 .withVersion(Environment.ST_KAFKA_VERSION)

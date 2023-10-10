@@ -13,12 +13,12 @@ import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBui
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.api.kafka.model.status.KafkaStatus;
 import io.strimzi.certs.OpenSslCertManager;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
 import io.strimzi.operator.cluster.model.AbstractModel;
-import io.strimzi.operator.cluster.model.ClientsCa;
+import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.cluster.model.ClusterCa;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaConfiguration;
@@ -26,8 +26,9 @@ import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.cluster.model.KafkaVersionChange;
 import io.strimzi.operator.cluster.model.PodSetUtils;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
+import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.MockCertManager;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.strimzi.operator.common.operator.resource.StrimziPodSetOperator;
@@ -45,6 +46,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -135,6 +138,8 @@ public class KafkaReconcilerUpgradeDowngradeTest {
 
         // Mock StrimziPodSet operations
         StrimziPodSetOperator mockSpsOps = supplier.strimziPodSetOperator;
+        when(mockSpsOps.listAsync(any(), any(Labels.class))).thenReturn(Future.succeededFuture(List.of()));
+        when(mockSpsOps.batchReconcile(any(), any(), any(), any())).thenCallRealMethod();
         ArgumentCaptor<StrimziPodSet> spsCaptor = ArgumentCaptor.forClass(StrimziPodSet.class);
         when(mockSpsOps.reconcile(any(), any(), any(), spsCaptor.capture())).thenReturn(Future.succeededFuture(ReconcileResult.patched(new StrimziPodSet())));
 
@@ -175,6 +180,8 @@ public class KafkaReconcilerUpgradeDowngradeTest {
 
         // Mock StrimziPodSet operations
         StrimziPodSetOperator mockSpsOps = supplier.strimziPodSetOperator;
+        when(mockSpsOps.listAsync(any(), any(Labels.class))).thenReturn(Future.succeededFuture(List.of()));
+        when(mockSpsOps.batchReconcile(any(), any(), any(), any())).thenCallRealMethod();
         ArgumentCaptor<StrimziPodSet> spsCaptor = ArgumentCaptor.forClass(StrimziPodSet.class);
         when(mockSpsOps.reconcile(any(), any(), any(), spsCaptor.capture())).thenReturn(Future.succeededFuture(ReconcileResult.patched(new StrimziPodSet())));
 
@@ -225,6 +232,8 @@ public class KafkaReconcilerUpgradeDowngradeTest {
 
         // Mock StrimziPodSet operations
         StrimziPodSetOperator mockSpsOps = supplier.strimziPodSetOperator;
+        when(mockSpsOps.listAsync(any(), any(Labels.class))).thenReturn(Future.succeededFuture(List.of()));
+        when(mockSpsOps.batchReconcile(any(), any(), any(), any())).thenCallRealMethod();
         ArgumentCaptor<StrimziPodSet> spsCaptor = ArgumentCaptor.forClass(StrimziPodSet.class);
         when(mockSpsOps.reconcile(any(), any(), any(), spsCaptor.capture())).thenReturn(Future.succeededFuture(ReconcileResult.patched(new StrimziPodSet())));
 
@@ -259,7 +268,7 @@ public class KafkaReconcilerUpgradeDowngradeTest {
 
     static class MockKafkaReconciler extends KafkaReconciler {
         public MockKafkaReconciler(Reconciliation reconciliation, ResourceOperatorSupplier supplier, Kafka kafkaCr, KafkaVersionChange versionChange) {
-            super(reconciliation, kafkaCr, null, 0, CLUSTER_CA, CLIENTS_CA, versionChange, CO_CONFIG, supplier, PFA, vertx);
+            super(reconciliation, kafkaCr, null, Map.of(), Map.of(), CLUSTER_CA, CLIENTS_CA, versionChange, CO_CONFIG, supplier, PFA, vertx);
             listenerReconciliationResults = new KafkaListenersReconciler.ReconciliationResult();
         }
 

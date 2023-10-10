@@ -66,17 +66,20 @@ run `brew install bash` to install a compatible version of `bash`. If you wish t
 updated bash run `sudo bash -c 'echo /usr/local/bin/bash >> /etc/shells'` and `chsh -s /usr/local/bin/bash`
 
 The `mvn` tool might install the latest version of OpenJDK during the brew install. For builds on macOS to succeed,
-OpenJDK version 11 needs to be installed. This can be done by running `brew install openjdk@11`. For maven to read the
+OpenJDK version 17 needs to be installed. This can be done by running `brew install openjdk@17`. For maven to read the
 new Java version, you will need to edit the `~/.mavenrc` file and paste the following
-line `export JAVA_HOME=/Library/Java/JavaVirtualMachines/openjdk-11.jdk/Contents/Home`.
+line `export JAVA_HOME=/Library/Java/JavaVirtualMachines/openjdk-17.jdk/Contents/Home`.
 
 You may come across an issue of linking from the above step. To solve this run this command: 
-`sudo ln -sfn /usr/local/opt/openjdk@11/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-11.jdk`.
+`sudo ln -sfn /usr/local/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk`.
 If this throws an error that it cannot find the file or directory, navigate into `/Library/Java/` (or however deep you
-can) and create a new folder named `JavaVirtualMachines` followed by creating a file named `openjdk-11.jdk`. The folder
-structure after everything is said and done should look like `/Library/Java/JavaVirtualMachines/openjdk-11.jdk`. After
+can) and create a new folder named `JavaVirtualMachines` followed by creating a file named `openjdk-17.jdk`. The folder
+structure after everything is said and done should look like `/Library/Java/JavaVirtualMachines/openjdk-17.jdk`. After
 doing that run the command at the beginning again and this should link the file and allow you to use maven with OpenJDK
-version 11.
+version 17.
+
+When running the tests, you may encounter `OpenSSL` related errors for parts that you may not have even worked on, in 
+which case you need to make sure you are using `OpenSSL` and not LibreSSL which comes by default with macOS.
 
 ### Kubernetes or OpenShift Cluster
 
@@ -155,7 +158,6 @@ this quick start guide.
         make all
 
    Once this completes you should have several new repositories under your Docker Hub account:
-    - `docker_registry_name/docker_hub_username/jmxtrans`
     - `docker_registry_name/docker_hub_username/kafka`
     - `docker_registry_name/docker_hub_username/kaniko-executor`
     - `docker_registry_name/docker_hub_username/maven-builder`
@@ -243,10 +245,7 @@ Commonly used Make targets:
 
 ### Java versions
 
-To use different Java version for the Maven build, you can specify the environment variable `JAVA_VERSION_BUILD` and set
-it to the desired Java version. For example, for building with Java 11 you can use `export JAVA_VERSION_BUILD=11`.
-
-> *Note*: Strimzi currently developed and tested with Java 11.
+Strimzi currently developed and tested with Java 17.
 
 ### Building Docker images
 
@@ -270,17 +269,11 @@ To configure the `docker_tag` and `docker_push` targets you can set following en
 * `DOCKER_ORG` configures the Docker organization for tagging/pushing the images (defaults to the value of the `$USER`
   environment variable)
 * `DOCKER_TAG` configured Docker tag (default is `latest`)
-* `DOCKER_REGISTRY` configures the Docker registry where the image will be pushed (default is `quay.io`)
+* `DOCKER_REGISTRY` configures the Docker registry where the image will be pushed (default is `docker.io`)
 
 ### Docker build options
 
 When building the Docker images you can use an alternative JRE or use an alternate base image.
-
-#### Alternative Docker image JRE
-
-The docker images can be built with an alternative Java version by setting the environment variable `JAVA_VERSION`. For
-example, to build docker images that have the Java 11 JRE installed use `JAVA_VERSION=11 make docker_build`. If not
-present, the container images will use Java **11** by default.
 
 #### Alternative `docker` command
 
@@ -353,7 +346,7 @@ and pull the official images instead of using your freshly built image.
 
 The `strimzi-kafka-operator` Helm Chart can be installed directly from its source.
 
-    `helm install packaging/helm-charts/helm3/strimzi-kafka-operator`
+    `helm install strimzi-operator packaging/helm-charts/helm3/strimzi-kafka-operator`
 
 The chart is also available in the release artifact as a tarball.
 
@@ -389,20 +382,16 @@ the commit if errors are detected:
 ./tools/git-hooks/checkstyle-pre-commit
 ```
 
-## Building container images for other platforms with Docker `buildx`
+## Building container images for other platforms
 
-Docker supports building images for different platforms using the `docker buildx` command. If you want to use it to
-build Strimzi images, you can just set the environment variable `DOCKER_BUILDX` to `buildx`, set the environment
-variable `DOCKER_BUILD_ARGS` to pass additional build options such as the platform and run the build. For example
-following can be used to build Strimzi images for Linux on Arm64 / AArch64:
+Docker and Podman supports building images for different platforms.
+If you want to build Strimzi images for other platforms, you can set the environment variable `DOCKER_PLATFORM`
+to pass additional build options and run the build.
+For example, following can be used to build Strimzi images for Linux on Arm64 / AArch64:
 
 ```
-export DOCKER_BUILDX=buildx
-export DOCKER_BUILD_ARGS="--platform linux/amd64 --load"
-make all
+DOCKER_PLATFORM="--platform linux/arm64" make all
 ```
-
-_Note: Strimzi currently does not officially support any other platforms then Linux on `amd64`._
 
 ## Adding support for new Kafka versions
 

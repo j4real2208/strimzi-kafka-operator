@@ -18,7 +18,7 @@ import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
 /**
- * Represents a status of the Kafka MirrorMaker 2.0 resource
+ * Represents a status of the Kafka MirrorMaker 2 resource
  */
 @Buildable(
         editableEnabled = false,
@@ -33,7 +33,9 @@ public class KafkaMirrorMaker2Status extends KafkaConnectStatus {
 
     private List<Map<String, Object>> connectors = new ArrayList<>(3);
 
-    @Description("List of MirrorMaker 2.0 connector statuses, as reported by the Kafka Connect REST API.")
+    private List<AutoRestartStatus> autoRestartStatuses = new ArrayList<>();
+
+    @Description("List of MirrorMaker 2 connector statuses, as reported by the Kafka Connect REST API.")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     public List<Map<String, Object>> getConnectors() {
         return connectors;
@@ -41,5 +43,15 @@ public class KafkaMirrorMaker2Status extends KafkaConnectStatus {
 
     public void setConnectors(List<Map<String, Object>> connectors) {
         this.connectors = connectors;
-    } 
+    }
+
+    @Description("List of MirrorMaker 2 connector auto restart statuses")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    public List<AutoRestartStatus> getAutoRestartStatuses() {
+        return autoRestartStatuses;
+    }
+
+    public void setAutoRestartStatuses(List<AutoRestartStatus> autoRestartStatuses) {
+        this.autoRestartStatuses = autoRestartStatuses;
+    }
 }

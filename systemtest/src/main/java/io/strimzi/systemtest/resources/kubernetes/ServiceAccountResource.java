@@ -22,11 +22,16 @@ public class ServiceAccountResource implements ResourceType<ServiceAccount> {
     }
     @Override
     public void create(ServiceAccount resource) {
-        kubeClient().createOrReplaceServiceAccount(resource);
+        kubeClient().createOrUpdateServiceAccount(resource);
     }
     @Override
     public void delete(ServiceAccount resource) {
         kubeClient().deleteServiceAccount(resource);
+    }
+
+    @Override
+    public void update(ServiceAccount resource) {
+        kubeClient().createOrUpdateServiceAccount(resource);
     }
 
     @Override

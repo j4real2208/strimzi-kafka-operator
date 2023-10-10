@@ -13,6 +13,17 @@ if [ -e "$KAFKA_HOME/init/rack.id" ]; then
   export STRIMZI_RACK_ID
 fi
 
+# Prepare hostname depending on whether we use StrimziPodSets (Stable Pod Identities) or Deployments
+# For StrimziPodSets we use the Pod DNS name assigned through the headless service
+# For Deployments we use the Pod IP address
+if [ "$STRIMZI_STABLE_IDENTITIES_ENABLED" = "true" ]; then
+  ADVERTISED_HOSTNAME=$(hostname -f | cut -d "." -f1-4)
+  export ADVERTISED_HOSTNAME
+else
+  ADVERTISED_HOSTNAME=$(hostname -I | awk '{ print $1 }')
+  export ADVERTISED_HOSTNAME
+fi
+
 # Generate temporary keystore password
 CERTS_STORE_PASSWORD=$(< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c32)
 export CERTS_STORE_PASSWORD
@@ -45,12 +56,16 @@ if [ "$KAFKA_CONNECT_METRICS_ENABLED" = "true" ]; then
     export KAFKA_OPTS
 fi
 
-. ./set_kafka_jmx_options.sh "${KAFKA_CONNECT_JMX_ENABLED}" "${KAFKA_CONNECT_JMX_USERNAME}" "${KAFKA_CONNECT_JMX_PASSWORD}"
+. ./set_kafka_jmx_options.sh "${STRIMZI_JMX_ENABLED}" "${STRIMZI_JMX_USERNAME}" "${STRIMZI_JMX_PASSWORD}"
 
-# enabling Tracing agent (initializes Jaeger tracing) as Java agent
-if [ "$STRIMZI_TRACING" = "jaeger" ]; then
-    KAFKA_OPTS="$KAFKA_OPTS -javaagent:$(ls "$KAFKA_HOME"/libs/tracing-agent*.jar)=jaeger"
+# enabling Tracing agent (initializes tracing) as Java agent
+if [ "$STRIMZI_TRACING" = "jaeger" ] || [ "$STRIMZI_TRACING" = "opentelemetry" ]; then
+    KAFKA_OPTS="$KAFKA_OPTS -javaagent:$(ls "$KAFKA_HOME"/libs/tracing-agent*.jar)=$STRIMZI_TRACING"
     export KAFKA_OPTS
+    if [ "$STRIMZI_TRACING" = "opentelemetry" ] && [ -z "$OTEL_TRACES_EXPORTER" ]; then
+      # auto-set OTLP exporter
+      export OTEL_TRACES_EXPORTER="otlp"
+    fi
 fi
 
 if [ -n "$STRIMZI_JAVA_SYSTEM_PROPERTIES" ]; then

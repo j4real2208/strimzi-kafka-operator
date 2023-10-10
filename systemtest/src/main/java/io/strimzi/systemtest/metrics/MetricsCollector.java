@@ -11,8 +11,10 @@ import io.strimzi.api.kafka.model.KafkaExporterResources;
 import io.strimzi.api.kafka.model.KafkaMirrorMaker2Resources;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.systemtest.Constants;
+import io.strimzi.systemtest.Environment;
 import io.strimzi.systemtest.resources.ComponentType;
-import io.strimzi.systemtest.resources.ResourceManager;
+import io.strimzi.systemtest.resources.crd.KafkaConnectResource;
+import io.strimzi.systemtest.resources.crd.KafkaMirrorMaker2Resource;
 import io.strimzi.systemtest.resources.crd.KafkaResource;
 import io.strimzi.test.TestUtils;
 import io.strimzi.test.executor.Exec;
@@ -39,6 +41,8 @@ public class MetricsCollector {
 
     private static final Logger LOGGER = LogManager.getLogger(MetricsCollector.class);
 
+    private static final Object LOCK = new Object();
+
     private String namespaceName;
     private String scraperPodName;
     private ComponentType componentType;
@@ -46,6 +50,7 @@ public class MetricsCollector {
     private int metricsPort;
     private String metricsPath;
     private LabelSelector componentLabelSelector;
+    private Map<String, String> collectedData;
 
     public static class Builder {
         private String namespaceName;
@@ -114,6 +119,10 @@ public class MetricsCollector {
         return metricsPort;
     }
 
+    public Map<String, String> getCollectedData() {
+        return collectedData;
+    }
+
     protected MetricsCollector.Builder newBuilder() {
         return new MetricsCollector.Builder();
     }
@@ -132,7 +141,7 @@ public class MetricsCollector {
 
     protected MetricsCollector(Builder builder) {
         if (builder.namespaceName == null || builder.namespaceName.isEmpty()) builder.namespaceName = kubeClient().getNamespace();
-        if (builder.scraperPodName == null || builder.scraperPodName.isEmpty()) throw new InvalidParameterException("Scraper pod name is not set");
+        if (builder.scraperPodName == null || builder.scraperPodName.isEmpty()) throw new InvalidParameterException("Scraper Pod name is not set");
         if (builder.componentType == null) throw new InvalidParameterException("Component type is not set");
         if (builder.componentName == null || builder.componentName.isEmpty()) {
             if (!builder.componentType.equals(ComponentType.ClusterOperator)) {
@@ -160,18 +169,18 @@ public class MetricsCollector {
             case Zookeeper:
                 return KafkaResource.getLabelSelector(componentName, KafkaResources.zookeeperStatefulSetName(componentName));
             case KafkaConnect:
-                return kubeClient(namespaceName).getDeploymentSelectors(KafkaConnectResources.deploymentName(componentName));
+                return KafkaConnectResource.getLabelSelector(componentName, KafkaConnectResources.deploymentName(componentName));
             case KafkaExporter:
-                return kubeClient(namespaceName).getDeploymentSelectors(KafkaExporterResources.deploymentName(componentName));
+                return kubeClient().getDeploymentSelectors(namespaceName, KafkaExporterResources.deploymentName(componentName));
             case KafkaMirrorMaker2:
-                return kubeClient(namespaceName).getDeploymentSelectors(KafkaMirrorMaker2Resources.deploymentName(componentName));
+                return KafkaMirrorMaker2Resource.getLabelSelector(componentName, KafkaMirrorMaker2Resources.deploymentName(componentName));
             case UserOperator:
             case TopicOperator:
-                return kubeClient(namespaceName).getDeploymentSelectors(KafkaResources.entityOperatorDeploymentName(componentName));
+                return kubeClient().getDeploymentSelectors(namespaceName, KafkaResources.entityOperatorDeploymentName(componentName));
             case ClusterOperator:
-                return kubeClient(namespaceName).getDeploymentSelectors(ResourceManager.getCoDeploymentName());
+                return kubeClient().getDeploymentSelectors(namespaceName, componentName);
             case KafkaBridge:
-                return kubeClient(namespaceName).getDeploymentSelectors(KafkaBridgeResources.deploymentName(componentName));
+                return kubeClient().getDeploymentSelectors(namespaceName, KafkaBridgeResources.deploymentName(componentName));
             default:
                 return new LabelSelector();
         }
@@ -208,18 +217,47 @@ public class MetricsCollector {
     /**
      * Parse out specific metric from whole metrics file
      * @param pattern regex pattern for specific metric
-     * @param data all metrics data
      * @return list of parsed values
      */
-    public static ArrayList<Double> collectSpecificMetric(Pattern pattern, Map<String, String> data) {
+    public ArrayList<Double> collectSpecificMetric(Pattern pattern) {
         ArrayList<Double> values = new ArrayList<>();
 
-        for (Map.Entry<String, String> entry : data.entrySet()) {
-            Matcher t = pattern.matcher(entry.getValue());
-            if (t.find()) {
-                values.add(Double.parseDouble(t.group(1)));
+        if (collectedData != null && !collectedData.isEmpty()) {
+            for (Map.Entry<String, String> entry : collectedData.entrySet()) {
+                Matcher t = pattern.matcher(entry.getValue());
+                if (t.find()) {
+                    values.add(Double.parseDouble(t.group(1)));
+                }
             }
         }
+
+        return values;
+    }
+
+    /**
+     * Method checks already collected metrics data for Pattern containing desired metric
+     * @param pattern Pattern of metric which is desired
+     *
+     * @return ArrayList of values collected from the metrics
+     */
+    public synchronized ArrayList<Double> waitForSpecificMetricAndCollect(Pattern pattern) {
+        ArrayList<Double> values = collectSpecificMetric(pattern);
+
+        if (values.isEmpty()) {
+            TestUtils.waitFor(String.format("metrics contain pattern: %s", pattern.toString()), Constants.GLOBAL_POLL_INTERVAL_MEDIUM, Constants.GLOBAL_STATUS_TIMEOUT, () -> {
+                this.collectMetricsFromPods();
+                LOGGER.debug("Collected data: {}", collectedData);
+                ArrayList<Double> vals = this.collectSpecificMetric(pattern);
+
+                if (!vals.isEmpty()) {
+                    values.addAll(vals);
+                    return true;
+                }
+
+                return false;
+            });
+        }
+
         return values;
     }
 
@@ -227,32 +265,32 @@ public class MetricsCollector {
      * Collect metrics from specific pod
      * @return collected metrics
      */
-    private String collectMetrics(String metricsPodIp) throws InterruptedException, ExecutionException, IOException {
+    private String collectMetrics(String metricsPodIp, String podName) throws InterruptedException, ExecutionException, IOException {
         List<String> executableCommand = Arrays.asList(cmdKubeClient(namespaceName).toString(), "exec", scraperPodName,
             "-n", namespaceName,
             "--", "curl", metricsPodIp + ":" + metricsPort + metricsPath);
+
+        LOGGER.debug("Executing command:{} for scrape the metrics", executableCommand);
 
         Exec exec = new Exec();
         // 20 seconds should be enough for collect data from the pod
         int ret = exec.execute(null, executableCommand, 20_000);
 
-        LOGGER.info("Metrics collection for PodIp {} from Pod {} finished with return code: {}", metricsPodIp, scraperPodName, ret);
-
+        LOGGER.info("Metrics collection for Pod: {}/{}({}) from Pod: {}/{} finished with return code: {}", namespaceName, podName, metricsPodIp, namespaceName, scraperPodName, ret);
         return exec.out();
     }
 
     /**
-     * Collect metrics from all pods with specific selector with wait
-     * @return map with metrics {podName, metrics}
+     * Collect metrics from all Pods with specific selector with wait
      */
     @SuppressWarnings("unchecked")
-    public Map<String, String> collectMetricsFromPods() {
+    public void collectMetricsFromPods() {
         Map<String, String>[] metricsData = (Map<String, String>[]) new HashMap[1];
-        TestUtils.waitFor("metrics has data", GLOBAL_POLL_INTERVAL, GLOBAL_TIMEOUT,
+        TestUtils.waitFor("metrics to contain data", GLOBAL_POLL_INTERVAL, GLOBAL_TIMEOUT,
             () -> {
                 metricsData[0] = collectMetricsFromPodsWithoutWait();
 
-                // Kafka Exporter metrics should be non-empty
+                // KafkaExporter metrics should be non-empty
                 if (!(metricsData[0].size() > 0)) {
                     return false;
                 }
@@ -265,14 +303,23 @@ public class MetricsCollector {
                 return true;
             });
 
-        return metricsData[0];
+        collectedData = metricsData[0];
     }
 
     public Map<String, String> collectMetricsFromPodsWithoutWait() {
         Map<String, String> map = new HashMap<>();
         kubeClient(namespaceName).listPods(namespaceName, componentLabelSelector).forEach(p -> {
             try {
-                map.put(p.getMetadata().getName(), collectMetrics(p.getStatus().getPodIP()));
+                final String podName = p.getMetadata().getName();
+                String podIP = p.getStatus().getPodIP();
+
+                if (Environment.isIpv6Family()) {
+                    // for curl command we need to add '[' and ']' to make it work
+                    // f.e. http://[fd00:10:244::1d]:9404 this would work but http://fd00:10:244::1d:9404 will not
+                    podIP = "[" + podIP + "]";
+                }
+
+                map.put(podName, collectMetrics(podIP, podName));
             } catch (InterruptedException | ExecutionException | IOException e) {
                 throw new RuntimeException(e);
             }

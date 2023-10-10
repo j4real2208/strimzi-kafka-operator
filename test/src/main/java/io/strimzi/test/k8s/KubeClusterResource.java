@@ -5,6 +5,7 @@
 package io.strimzi.test.k8s;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.strimzi.test.k8s.cluster.Kind;
 import io.strimzi.test.k8s.cluster.KubeCluster;
 import io.strimzi.test.k8s.cluster.OpenShift;
 import io.strimzi.test.k8s.cmdClient.KubeCmdClient;
@@ -147,7 +148,7 @@ public class KubeClusterResource {
         bindingsNamespaces = namespaces;
         for (String namespace: namespaces) {
 
-            if (kubeClient().getNamespace(namespace) != null && System.getenv("SKIP_TEARDOWN") == null) {
+            if (kubeClient().getNamespace(namespace) != null && (System.getenv("SKIP_TEARDOWN") == null || !System.getenv("SKIP_TEARDOWN").equals("true"))) {
                 LOGGER.warn("Namespace {} is already created, going to delete it", namespace);
                 kubeClient().deleteNamespace(namespace);
                 cmdKubeClient().waitForResourceDeletion("Namespace", namespace);
@@ -215,8 +216,7 @@ public class KubeClusterResource {
                     .forEach(namespaceName -> {
                         LOGGER.debug("Deleting Namespace: {}", namespaceName);
                         kubeClient().deleteNamespace(namespaceName);
-                        client.getClient().namespaces().withName(namespaceName).waitUntilCondition(
-                            namespace -> client.getClient().namespaces().withName(namespaceName).get() == null, 4, TimeUnit.MINUTES);
+                        client.getClient().namespaces().withName(namespaceName).waitUntilCondition(namespace -> namespace == null, 4, TimeUnit.MINUTES);
                     }));
 
         MAP_WITH_SUITE_NAMESPACES.clear();
@@ -363,12 +363,12 @@ public class KubeClusterResource {
         return kubeCluster;
     }
 
-    public String getDefaultOlmNamespace() {
-        return cluster().defaultOlmNamespace();
-    }
-
     public boolean isOpenShift() {
         return kubeClusterResource.cluster() instanceof OpenShift;
+    }
+
+    public boolean isKind() {
+        return kubeClusterResource.cluster() instanceof Kind;
     }
 
     /** Returns list of currently deployed resources */
@@ -399,5 +399,12 @@ public class KubeClusterResource {
 
     public static Map<CollectorElement, Set<String>> getMapWithSuiteNamespaces() {
         return MAP_WITH_SUITE_NAMESPACES;
+    }
+
+    public boolean fipsEnabled() {
+        if (isOpenShift()) {
+            return kubeClient().getConfigMap("kube-system", "cluster-config-v1").getData().get("install-config").contains("fips: true");
+        }
+        return false;
     }
 }

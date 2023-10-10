@@ -4,143 +4,195 @@
  */
 package io.strimzi.operator.user;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.strimzi.api.kafka.Crds;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.jvm.ClassLoaderMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.strimzi.api.kafka.KafkaUserList;
 import io.strimzi.api.kafka.model.KafkaUser;
 import io.strimzi.certs.OpenSslCertManager;
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.DefaultAdminClientProvider;
+import io.strimzi.operator.common.MetricsProvider;
+import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.strimzi.operator.common.OperatorKubernetesClientBuilder;
 import io.strimzi.operator.common.Util;
-import io.strimzi.operator.common.ShutdownHook;
-import io.strimzi.operator.common.operator.resource.CrdOperator;
-import io.strimzi.operator.common.operator.resource.SecretOperator;
+import io.strimzi.operator.common.http.HealthCheckAndMetricsServer;
+import io.strimzi.operator.common.operator.resource.concurrent.CrdOperator;
+import io.strimzi.operator.common.operator.resource.concurrent.SecretOperator;
+import io.strimzi.operator.user.operator.DisabledSimpleAclOperator;
 import io.strimzi.operator.user.operator.KafkaUserOperator;
 import io.strimzi.operator.user.operator.QuotasOperator;
 import io.strimzi.operator.user.operator.ScramCredentialsOperator;
 import io.strimzi.operator.user.operator.SimpleAclOperator;
-import io.vertx.core.CompositeFuture;
-import io.vertx.core.Future;
-import io.vertx.core.Promise;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.micrometer.MicrometerMetricsOptions;
-import io.vertx.micrometer.VertxPrometheusOptions;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.security.Security;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
-@SuppressFBWarnings("DM_EXIT")
+/**
+ * The main class of the Strimzi User Operator
+ *
+ * Due to the number of classes instantiated in Main for bootstrapping the
+ * operator, the checkstyle error for Class Data Abstraction Coupling is
+ * disabled here. See
+ * https://checkstyle.sourceforge.io/checks/metrics/classdataabstractioncoupling.html
+ */
+@SuppressWarnings("checkstyle:classdataabstractioncoupling")
 public class Main {
-    private final static Logger LOGGER = LogManager.getLogger(Main.class);
+    private static final Logger LOGGER = LogManager.getLogger(Main.class);
 
-    static {
-        try {
-            Crds.registerCustomKinds();
-        } catch (Error | RuntimeException t) {
-            LOGGER.error("Failed to register CRDs", t);
-            throw t;
-        }
-    }
-
+    /**
+     * Main method which starts the webserver with healthchecks and metrics and the UserController which is responsible
+     * for handling users
+     *
+     * @param args  Startup arguments
+     */
     public static void main(String[] args) {
-        final String strimziVersion = Main.class.getPackage().getImplementationVersion();
-        LOGGER.info("UserOperator {} is starting", strimziVersion);
-        UserOperatorConfig config = UserOperatorConfig.fromMap(System.getenv());
-        //Setup Micrometer metrics options
-        VertxOptions options = new VertxOptions().setMetricsOptions(
-                new MicrometerMetricsOptions()
-                        .setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true))
-                        .setJvmMetricsEnabled(true)
-                        .setEnabled(true));
-        Vertx vertx = Vertx.vertx(options);
-        Runtime.getRuntime().addShutdownHook(new Thread(new ShutdownHook(vertx)));
+        LOGGER.info("UserOperator {} is starting", Main.class.getPackage().getImplementationVersion());
 
-        KubernetesClient client = new OperatorKubernetesClientBuilder("strimzi-user-operator", strimziVersion).build();
-        AdminClientProvider adminClientProvider = new DefaultAdminClientProvider();
-
-        run(vertx, client, adminClientProvider, config).onComplete(ar -> {
-            if (ar.failed()) {
-                LOGGER.error("Unable to start operator", ar.cause());
-                System.exit(1);
-            }
-        });
-    }
-
-    static Future<String> run(Vertx vertx, KubernetesClient client, AdminClientProvider adminClientProvider, UserOperatorConfig config) {
+        // Log environment information
         Util.printEnvInfo();
+
+        // Disable DNS caching
         String dnsCacheTtl = System.getenv("STRIMZI_DNS_CACHE_TTL") == null ? "30" : System.getenv("STRIMZI_DNS_CACHE_TTL");
         Security.setProperty("networkaddress.cache.ttl", dnsCacheTtl);
 
-        OpenSslCertManager certManager = new OpenSslCertManager();
-        SecretOperator secretOperations = new SecretOperator(vertx, client);
-        CrdOperator<KubernetesClient, KafkaUser, KafkaUserList> crdOperations = new CrdOperator<>(vertx, client, KafkaUser.class, KafkaUserList.class, KafkaUser.RESOURCE_KIND);
-        return createAdminClient(adminClientProvider, config, secretOperations)
-                .compose(adminClient -> {
-                    SimpleAclOperator aclOperations = new SimpleAclOperator(vertx, adminClient);
-                    ScramCredentialsOperator scramCredentialsOperator = new ScramCredentialsOperator(vertx, adminClient);
-                    QuotasOperator quotasOperator = new QuotasOperator(vertx, adminClient);
+        // Create and log UserOperatorConfig
+        UserOperatorConfig config = UserOperatorConfig.buildFromMap(System.getenv());
+        LOGGER.info("Cluster Operator configuration is {}", config);
 
-                    KafkaUserOperator kafkaUserOperations = new KafkaUserOperator(vertx, certManager, crdOperations,
-                            secretOperations, scramCredentialsOperator, quotasOperator, aclOperations, config);
+        // Create KubernetesClient, AdminClient and KafkaUserOperator classes
+        ExecutorService kafkaUserOperatorExecutor = Executors.newFixedThreadPool(config.getUserOperationsThreadPoolSize(), new OperatorWorkThreadFactory());
+        KubernetesClient client = new OperatorKubernetesClientBuilder("strimzi-user-operator", Main.class.getPackage().getImplementationVersion()).build();
+        SecretOperator secretOperator = new SecretOperator(kafkaUserOperatorExecutor, client);
+        Admin adminClient = createAdminClient(config, secretOperator, new DefaultAdminClientProvider());
+        var kafkaUserCrdOperator = new CrdOperator<>(kafkaUserOperatorExecutor, client, KafkaUser.class, KafkaUserList.class, "KafkaUser");
 
-                    Promise<String> promise = Promise.promise();
-                    UserOperator operator = new UserOperator(config.getNamespace(),
-                            config,
-                            client,
-                            kafkaUserOperations);
-                    vertx.deployVerticle(operator,
-                        res -> {
-                            if (res.succeeded()) {
-                                LOGGER.info("User Operator verticle started in namespace {}", config.getNamespace());
-                            } else {
-                                LOGGER.error("User Operator verticle in namespace {} failed to start", config.getNamespace(), res.cause());
-                                System.exit(1);
-                            }
-                            promise.handle(res);
-                        });
-                    return promise.future();
-                });
+        KafkaUserOperator kafkaUserOperator = new KafkaUserOperator(
+                config,
+                new OpenSslCertManager(),
+                secretOperator,
+                kafkaUserCrdOperator,
+                new ScramCredentialsOperator(adminClient, config, kafkaUserOperatorExecutor),
+                new QuotasOperator(adminClient, config, kafkaUserOperatorExecutor),
+                config.isAclsAdminApiSupported() ? new SimpleAclOperator(adminClient, config, kafkaUserOperatorExecutor) : new DisabledSimpleAclOperator()
+        );
+
+        MetricsProvider metricsProvider = createMetricsProvider();
+
+        // Create the User controller
+        UserController controller = new UserController(
+                config,
+                secretOperator,
+                kafkaUserCrdOperator,
+                kafkaUserOperator,
+                metricsProvider
+        );
+
+        // Create the health check and metrics server
+        HealthCheckAndMetricsServer healthCheckAndMetricsServer = new HealthCheckAndMetricsServer(controller, controller, metricsProvider);
+
+        // Start health check server, KafkaUser operator and the controller
+        healthCheckAndMetricsServer.start();
+        kafkaUserOperator.start();
+        controller.start();
+
+        // Register shutdown hooks
+        LOGGER.info("Registering shutdown hook");
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("Requesting controller to stop");
+            controller.stop();
+
+            LOGGER.info("Requesting KafkaUser operator to stop");
+            kafkaUserOperator.stop();
+            kafkaUserOperatorExecutor.shutdownNow(); // We do not wait for termination
+
+            LOGGER.info("Requesting controller to stop");
+            healthCheckAndMetricsServer.stop();
+
+            LOGGER.info("Requesting Kafka Admin client to stop");
+            adminClient.close();
+
+            LOGGER.info("Requesting Kubernetes client to stop");
+            client.close();
+
+            LOGGER.info("Shutdown complete");
+        }));
     }
 
-    private static Future<Admin> createAdminClient(AdminClientProvider adminClientProvider, UserOperatorConfig config, SecretOperator secretOperations) {
-        Promise<Admin> promise = Promise.promise();
+    /**
+     * Creates the Kafka Admin API client
+     *
+     * @param config                User Operator configuration
+     * @param secretOperator        Secret operator for managing secrets
+     * @param adminClientProvider   Admin client provider
+     *
+     * @return  An instance of the Admin API client
+     */
+    private static Admin createAdminClient(UserOperatorConfig config, SecretOperator secretOperator, AdminClientProvider adminClientProvider)    {
+        Secret clusterCaCert = getSecret(secretOperator, config.getCaNamespaceOrNamespace(), config.getClusterCaCertSecretName());
+        Secret uoKeyAndCert = getSecret(secretOperator, config.getCaNamespaceOrNamespace(), config.getEuoKeySecretName());
 
-        Future<Secret> clusterCaCertSecretFuture;
-        if (config.getClusterCaCertSecretName() != null && !config.getClusterCaCertSecretName().isEmpty()) {
-            clusterCaCertSecretFuture = secretOperations.getAsync(config.getCaNamespace(), config.getClusterCaCertSecretName());
-        } else {
-            clusterCaCertSecretFuture = Future.succeededFuture(null);
+        return adminClientProvider.createAdminClient(
+                config.getKafkaBootstrapServers(),
+                clusterCaCert,
+                uoKeyAndCert,
+                uoKeyAndCert != null ? "entity-operator" : null, // When the UO secret is not null (i.e. mTLS is used), we set the name. Otherwise, we just pass null.
+                config.getKafkaAdminClientConfiguration());
+    }
+
+    /**
+     * Fetch a secret with the given name and namespace using the secretOperator if
+     * the name is present.
+     *
+     * @param secretOperator secret operator to retrieve the secret
+     * @param namespace      namespace of the secret
+     * @param name           name of the secret
+     * @return the secret or null if not found or the name is not given
+     */
+    private static Secret getSecret(SecretOperator secretOperator, String namespace, String name) {
+        if (name != null && !name.isEmpty()) {
+            return secretOperator.get(namespace, name);
         }
-        Future<Secret> euoKeySecretFuture;
-        if (config.getEuoKeySecretName() != null && !config.getEuoKeySecretName().isEmpty()) {
-            euoKeySecretFuture = secretOperations.getAsync(config.getCaNamespace(), config.getEuoKeySecretName());
-        } else {
-            euoKeySecretFuture = Future.succeededFuture(null);
+        return null;
+    }
+
+    /**
+     * Creates the MetricsProvider instance based on a PrometheusMeterRegistry and binds the JVM metrics to it
+     *
+     * @return  MetricsProvider instance
+     */
+    private static MetricsProvider createMetricsProvider()  {
+        MeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+
+        // Bind JVM metrics
+        new ClassLoaderMetrics().bindTo(registry);
+        new JvmMemoryMetrics().bindTo(registry);
+        new JvmGcMetrics().bindTo(registry);
+        new ProcessorMetrics().bindTo(registry);
+        new JvmThreadMetrics().bindTo(registry);
+
+        return new MicrometerMetricsProvider(registry);
+    }
+
+    private static class OperatorWorkThreadFactory implements ThreadFactory {
+        private final AtomicInteger threadCounter = new AtomicInteger(0);
+
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, "operator-thread-pool-" + threadCounter.getAndIncrement());
         }
-
-        CompositeFuture.join(clusterCaCertSecretFuture, euoKeySecretFuture)
-                .onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        Admin adminClient = adminClientProvider
-                                .createAdminClient(
-                                        config.getKafkaBootstrapServers(),
-                                        clusterCaCertSecretFuture.result(),
-                                        euoKeySecretFuture.result(),
-                                        euoKeySecretFuture.result() != null ? "entity-operator" : null,
-                                        config.getKafkaAdminClientConfiguration()
-                                );
-                        promise.complete(adminClient);
-                    } else {
-                        promise.fail(ar.cause());
-                    }
-                });
-
-        return promise.future();
     }
 }

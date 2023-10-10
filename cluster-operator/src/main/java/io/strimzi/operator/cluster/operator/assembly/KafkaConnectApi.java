@@ -25,7 +25,7 @@ public interface KafkaConnectApi {
      * @param host The host to make the request to.
      * @param port The port to make the request to.
      * @param connectorName The name of the connector to create or update.
-     * @param configJson The connectors configuration.
+     * @param configJson The connector configuration.
      * @return A Future which completes with the result of the request. If the request was successful,
      * this returns information about the connector, including its name, config and tasks.
      */
@@ -42,6 +42,17 @@ public interface KafkaConnectApi {
      */
     Future<Map<String, String>> getConnectorConfig(Reconciliation reconciliation, String host, int port, String connectorName);
 
+    /**
+     * Make a {@code GET} request to {@code /connectors/${connectorName}/config}.
+     *
+     * @param reconciliation    The reconciliation
+     * @param backOff           The backoff parameters
+     * @param host              The host to make the request to.
+     * @param port              The port to make the request to.
+     * @param connectorName     The name of the connector to get the config of.
+     *
+     * @return A Future which completes with the result of the request. If the request was successful, this returns the connector's config.
+     */
     Future<Map<String, String>> getConnectorConfig(Reconciliation reconciliation, BackOff backOff, String host, int port, String connectorName);
 
     /**
@@ -102,30 +113,43 @@ public interface KafkaConnectApi {
 
     /**
      * Make a {@code PUT} request to {@code /connectors/${connectorName}/pause}.
+     * @param reconciliation The reconciliation
      * @param host The host to make the request to.
      * @param port The port to make the request to.
      * @param connectorName The name of the connector to pause.
      * @return A Future which completes with the result of the request.
      */
-    Future<Void> pause(String host, int port, String connectorName);
+    Future<Void> pause(Reconciliation reconciliation, String host, int port, String connectorName);
+
+    /**
+     * Make a {@code PUT} request to {@code /connectors/${connectorName}/stop}.
+     * @param reconciliation The reconciliation
+     * @param host The host to make the request to.
+     * @param port The port to make the request to.
+     * @param connectorName The name of the connector to pause.
+     * @return A Future which completes with the result of the request.
+     */
+    Future<Void> stop(Reconciliation reconciliation, String host, int port, String connectorName);
 
     /**
      * Make a {@code PUT} request to {@code /connectors/${connectorName}/resume}.
+     * @param reconciliation The reconciliation
      * @param host The host to make the request to.
      * @param port The port to make the request to.
      * @param connectorName The name of the connector to resume.
      * @return A Future which completes with the result of the request.
      */
-    Future<Void> resume(String host, int port, String connectorName);
+    Future<Void> resume(Reconciliation reconciliation,  String host, int port, String connectorName);
 
     /**
      * Make a {@code GET} request to {@code /connectors}
+     * @param reconciliation The reconciliation
      * @param host The host to make the request to.
      * @param port The port to make the request to.
      * @return A Future which completes with the result of the request. If the request was successful,
      * this returns the list of connectors.
      */
-    Future<List<String>> list(String host, int port);
+    Future<List<String>> list(Reconciliation reconciliation, String host, int port);
 
     /**
      * Make a {@code GET} request to {@code /connector-plugins}.
@@ -161,12 +185,15 @@ public interface KafkaConnectApi {
 
     /**
      * Make a {@code POST} request to {@code /connectors/${connectorName}/restart}.
-     * @param host The host to make the request to.
-     * @param port The port to make the request to.
+     *
+     * @param host          The host to make the request to.
+     * @param port          The port to make the request to.
      * @param connectorName The name of the connector to restart.
-     * @return A Future which completes with the result of the request.
+     * @param includeTasks  Whether to restart the connector instance and task instances or just the connector.
+     * @param onlyFailed    Specifies whether to restart just the instances with a FAILED status or all instances.
+     * @return A Future which completes with the result of the request and the new status of the connector
      */
-    Future<Void> restart(String host, int port, String connectorName);
+    Future<Map<String, Object>> restart(String host, int port, String connectorName, boolean includeTasks, boolean onlyFailed);
 
     /**
      * Make a {@code POST} request to {@code /connectors/${connectorName}/tasks/${taskID}/restart}.

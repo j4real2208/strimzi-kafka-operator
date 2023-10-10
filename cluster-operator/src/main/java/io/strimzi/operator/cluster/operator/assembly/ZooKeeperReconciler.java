@@ -5,22 +5,19 @@
 package io.strimzi.operator.cluster.operator.assembly;
 
 import io.fabric8.kubernetes.api.model.ConfigMap;
-import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Secret;
-import io.fabric8.kubernetes.api.model.apps.StatefulSet;
-import io.fabric8.kubernetes.api.model.policy.v1.PodDisruptionBudget;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.status.KafkaStatus;
 import io.strimzi.api.kafka.model.storage.Storage;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
-import io.strimzi.operator.cluster.FeatureGates;
-import io.strimzi.operator.cluster.model.Ca;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.cluster.model.CertUtils;
 import io.strimzi.operator.cluster.model.ClusterCa;
 import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.model.ImagePullPolicy;
@@ -41,7 +38,6 @@ import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.resource.ConfigMapOperator;
 import io.strimzi.operator.common.operator.resource.NetworkPolicyOperator;
 import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetOperator;
-import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetV1Beta1Operator;
 import io.strimzi.operator.common.operator.resource.PodOperator;
 import io.strimzi.operator.common.operator.resource.PvcOperator;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
@@ -56,6 +52,7 @@ import io.vertx.core.Vertx;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -65,6 +62,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.strimzi.operator.common.Annotations.ANNO_STRIMZI_SERVER_CERT_HASH;
 import static java.util.Collections.singletonList;
 
 /**
@@ -86,7 +84,6 @@ public class ZooKeeperReconciler {
     private final Labels operatorNamespaceLabels;
     private final boolean isNetworkPolicyGeneration;
     private final PlatformFeaturesAvailability pfa;
-    private final FeatureGates featureGates;
     private final int adminSessionTimeoutMs;
     private final ImagePullPolicy imagePullPolicy;
     private final List<LocalObjectReference> imagePullSecrets;
@@ -101,7 +98,6 @@ public class ZooKeeperReconciler {
     private final ConfigMapOperator configMapOperator;
     private final NetworkPolicyOperator networkPolicyOperator;
     private final PodDisruptionBudgetOperator podDisruptionBudgetOperator;
-    private final PodDisruptionBudgetV1Beta1Operator podDisruptionBudgetV1Beta1Operator;
     private final PodOperator podOperator;
 
     private final ZookeeperScalerProvider zooScalerProvider;
@@ -110,9 +106,9 @@ public class ZooKeeperReconciler {
     private final Integer currentReplicas;
 
     private final Set<String> fsResizingRestartRequest = new HashSet<>();
-    private ReconcileResult<StatefulSet> statefulSetDiff;
     private ReconcileResult<StrimziPodSet> podSetDiff;
-    private boolean existingCertsChanged = false;
+    private final Map<Integer, String> zkCertificateHash = new HashMap<>();
+
     private String loggingHash = "";
 
     /**
@@ -144,7 +140,7 @@ public class ZooKeeperReconciler {
         this.reconciliation = reconciliation;
         this.vertx = vertx;
         this.operationTimeoutMs = config.getOperationTimeoutMs();
-        this.zk = ZookeeperCluster.fromCrd(reconciliation, kafkaAssembly, config.versions(), oldStorage, currentReplicas);
+        this.zk = ZookeeperCluster.fromCrd(reconciliation, kafkaAssembly, config.versions(), oldStorage, currentReplicas, supplier.sharedEnvironmentProvider);
         this.versionChange = versionChange;
         this.currentReplicas = currentReplicas;
         this.clusterCa = clusterCa;
@@ -153,7 +149,6 @@ public class ZooKeeperReconciler {
         this.operatorNamespaceLabels = config.getOperatorNamespaceLabels();
         this.isNetworkPolicyGeneration = config.isNetworkPolicyGeneration();
         this.pfa = pfa;
-        this.featureGates = config.featureGates();
         this.adminSessionTimeoutMs = config.getZkAdminSessionTimeoutMs();
         this.imagePullPolicy = config.getImagePullPolicy();
         this.imagePullSecrets = config.getImagePullSecrets();
@@ -168,7 +163,6 @@ public class ZooKeeperReconciler {
         this.configMapOperator = supplier.configMapOperations;
         this.networkPolicyOperator = supplier.networkPolicyOperator;
         this.podDisruptionBudgetOperator = supplier.podDisruptionBudgetOperator;
-        this.podDisruptionBudgetV1Beta1Operator = supplier.podDisruptionBudgetV1Beta1Operator;
         this.podOperator = supplier.podOperations;
 
         this.zooScalerProvider = supplier.zkScalerProvider;
@@ -193,14 +187,13 @@ public class ZooKeeperReconciler {
                 .compose(i -> manualRollingUpdate())
                 .compose(i -> logVersionChange())
                 .compose(i -> serviceAccount())
-                .compose(i -> pvcs())
+                .compose(i -> pvcs(kafkaStatus))
                 .compose(i -> service())
                 .compose(i -> headlessService())
                 .compose(i -> certificateSecret(clock))
                 .compose(i -> loggingAndMetricsConfigMap())
                 .compose(i -> podDisruptionBudget())
-                .compose(i -> podDisruptionBudgetV1Beta1())
-                .compose(i -> statefulSet())
+                .compose(i -> migrateFromStatefulSetToPodSet())
                 .compose(i -> podSet())
                 .compose(i -> scaleDown())
                 .compose(i -> rollingUpdate())
@@ -230,24 +223,7 @@ public class ZooKeeperReconciler {
      * @return  Completes when the JMX secret is successfully created or updated
      */
     protected Future<Void> jmxSecret() {
-        return secretOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperJmxSecretName(reconciliation.name()))
-                .compose(currentJmxSecret -> {
-                    Secret desiredJmxSecret = zk.generateJmxSecret(currentJmxSecret);
-
-                    if (desiredJmxSecret != null)  {
-                        // Desired secret is not null => should be updated
-                        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperJmxSecretName(reconciliation.name()), desiredJmxSecret)
-                                .map((Void) null);
-                    } else if (currentJmxSecret != null)    {
-                        // Desired secret is null but current is not => we should delete the secret
-                        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperJmxSecretName(reconciliation.name()), null)
-                                .map((Void) null);
-                    } else {
-                        // Both current and desired secret are null => nothing to do
-                        return Future.succeededFuture();
-                    }
-
-                });
+        return ReconcilerUtils.reconcileJmxSecret(reconciliation, secretOperator, zk);
     }
 
     /**
@@ -258,15 +234,11 @@ public class ZooKeeperReconciler {
     protected Future<Void> manualPodCleaning() {
         return new ManualPodCleaner(
                 reconciliation,
-                KafkaResources.zookeeperStatefulSetName(reconciliation.name()),
                 zk.getSelectorLabels(),
-                operationTimeoutMs,
-                featureGates.useStrimziPodSetsEnabled(),
-                stsOperator,
                 strimziPodSetOperator,
                 podOperator,
                 pvcOperator
-        ).maybeManualPodCleaning(zk.generatePersistentVolumeClaims());
+        ).maybeManualPodCleaning();
     }
 
     /**
@@ -284,37 +256,29 @@ public class ZooKeeperReconciler {
     }
 
     /**
-     * Does manual rolling update of Zoo pods based on an annotation on the StatefulSet or on the Pods. Annotation
-     * on StatefulSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
-     * the selected pods. If the annotation is present on both StatefulSet and one or more pods, only one rolling
+     * Does manual rolling update of Zoo pods based on an annotation on the StrimziPodSet or on the Pods. Annotation
+     * on StrimziPodSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
+     * the selected pods. If the annotation is present on both StrimziPodSet and one or more pods, only one rolling
      * update of all pods occurs.
      *
      * @return  Future with the result of the rolling update
      */
     protected Future<Void> manualRollingUpdate() {
-        Future<HasMetadata> futureController;
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            futureController = strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
-                    .map(podSet -> podSet); // The .map(...) is required to convert to HasMetadata
-        } else {
-            futureController = stsOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
-                    .map(sts -> sts); // The .map(...) is required to convert to HasMetadata
-        }
-
-        return futureController.compose(controller -> {
-            if (controller != null
-                    && Annotations.booleanAnnotation(controller, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
-                // User trigger rolling update of the whole cluster
-                return maybeRollZooKeeper(pod -> {
-                    LOGGER.debugCr(reconciliation, "Rolling Zookeeper pod {} due to manual rolling update", pod.getMetadata().getName());
-                    return singletonList("manual rolling update");
+        return strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
+                .compose(podSet -> {
+                    if (podSet != null
+                            && Annotations.booleanAnnotation(podSet, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
+                        // User trigger rolling update of the whole cluster
+                        return maybeRollZooKeeper(pod -> {
+                            LOGGER.debugCr(reconciliation, "Rolling Zookeeper pod {} due to manual rolling update", pod.getMetadata().getName());
+                            return singletonList("manual rolling update");
+                        });
+                    } else {
+                        // The StrimziPodSet does not exist or is not annotated
+                        // But maybe the individual pods are annotated to restart only some of them.
+                        return manualPodRollingUpdate();
+                    }
                 });
-            } else {
-                // The controller does not exist or is not annotated
-                // But maybe the individual pods are annotated to restart only some of them.
-                return manualPodRollingUpdate();
-            }
-        });
     }
 
     /**
@@ -400,13 +364,15 @@ public class ZooKeeperReconciler {
      * Manages the PVCs needed by the ZooKeeper cluster. This method only creates or updates the PVCs. Deletion of PVCs
      * after scale-down happens only at the end of the reconciliation when they are not used anymore.
      *
+     * @param kafkaStatus   Status of the Kafka custom resource where warnings about any issues with resizing will be added
+     *
      * @return  Completes when the PVCs were successfully created or updated
      */
-    protected Future<Void> pvcs() {
+    protected Future<Void> pvcs(KafkaStatus kafkaStatus) {
         List<PersistentVolumeClaim> pvcs = zk.generatePersistentVolumeClaims();
 
         return new PvcReconciler(reconciliation, pvcOperator, storageClassOperator)
-                .resizeAndReconcilePvcs(podIndex -> KafkaResources.zookeeperPodName(reconciliation.name(), podIndex), pvcs)
+                .resizeAndReconcilePvcs(kafkaStatus, podIndex -> KafkaResources.zookeeperPodName(reconciliation.name(), podIndex), pvcs)
                 .compose(podsToRestart -> {
                     fsResizingRestartRequest.addAll(podsToRestart);
                     return Future.succeededFuture();
@@ -448,11 +414,15 @@ public class ZooKeeperReconciler {
                             .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperSecretName(reconciliation.name()),
                                     zk.generateCertificatesSecret(clusterCa, Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())))
                             .compose(patchResult -> {
-                                if (patchResult instanceof ReconcileResult.Patched) {
-                                    // The secret is patched and some changes to the existing certificates actually occurred
-                                    existingCertsChanged = ModelUtils.doExistingCertificatesDiffer(oldSecret, patchResult.resource());
-                                } else {
-                                    existingCertsChanged = false;
+                                if (patchResult != null) {
+                                    for (int podNum = 0; podNum < zk.getReplicas(); podNum++) {
+                                        var podName = KafkaResources.zookeeperPodName(reconciliation.name(), podNum);
+                                        zkCertificateHash.put(
+                                                podNum,
+                                                CertUtils.getCertificateThumbprint(patchResult.resource(),
+                                                        ClusterCa.secretEntryNameForPod(podName, Ca.SecretEntry.CRT)
+                                                ));
+                                    }
                                 }
 
                                 return Future.succeededFuture();
@@ -466,11 +436,11 @@ public class ZooKeeperReconciler {
      * @return  Completes when the ConfigMap was successfully created or updated
      */
     protected Future<Void> loggingAndMetricsConfigMap() {
-        return Util.metricsAndLogging(reconciliation, configMapOperator, reconciliation.namespace(), zk.getLogging(), zk.getMetricsConfigInCm())
+        return MetricsAndLoggingUtils.metricsAndLogging(reconciliation, configMapOperator, zk.logging(), zk.metrics())
                 .compose(metricsAndLogging -> {
                     ConfigMap logAndMetricsConfigMap = zk.generateConfigurationConfigMap(metricsAndLogging);
 
-                    loggingHash = Util.hashStub(logAndMetricsConfigMap.getData().get(zk.getAncillaryConfigMapKeyLogConfig()));
+                    loggingHash = Util.hashStub(logAndMetricsConfigMap.getData().get(zk.logging().configMapKey()));
 
                     return configMapOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperMetricsAndLogConfigMapName(reconciliation.name()), logAndMetricsConfigMap)
                             .map((Void) null);
@@ -483,72 +453,28 @@ public class ZooKeeperReconciler {
      * @return  Completes when the PDB was successfully created or updated
      */
     protected Future<Void> podDisruptionBudget() {
-        if (!pfa.hasPodDisruptionBudgetV1()) {
-            return Future.succeededFuture();
-        } else {
-            PodDisruptionBudget pdb;
-
-            if (featureGates.useStrimziPodSetsEnabled()) {
-                pdb = zk.generateCustomControllerPodDisruptionBudget();
-            } else {
-                pdb = zk.generatePodDisruptionBudget();
-            }
-
-            return podDisruptionBudgetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), pdb)
-                    .map((Void) null);
-        }
+        return podDisruptionBudgetOperator
+                .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), zk.generatePodDisruptionBudget())
+                .map((Void) null);
     }
 
     /**
-     * Manages the PodDisruptionBudgets on Kubernetes clusters which support only v1beta1 version of PDBs
+     * Helps with the migration from StatefulSets to StrimziPodSets when the cluster is switching between them. When the
+     * switch happens, it deletes the old StatefulSet. It should happen before the new PodSet is created to
+     * allow the controller hand-off.
      *
-     * @return  Completes when the PDB was successfully created or updated
+     * @return          Future which completes when the StatefulSet is deleted or does not need to be deleted
      */
-    protected Future<Void> podDisruptionBudgetV1Beta1() {
-        if (pfa.hasPodDisruptionBudgetV1()) {
-            return Future.succeededFuture();
-        } else {
-            io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdb;
-
-            if (featureGates.useStrimziPodSetsEnabled()) {
-                pdb = zk.generateCustomControllerPodDisruptionBudgetV1Beta1();
-            } else {
-                pdb = zk.generatePodDisruptionBudgetV1Beta1();
-            }
-
-            return podDisruptionBudgetV1Beta1Operator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), pdb)
-                    .map((Void) null);
-        }
-    }
-
-    /**
-     * Create or update the StatefulSet for the ZooKeeper cluster. When StatefulSets are disabled, it will try to delete
-     * the old StatefulSet.
-     *
-     * @return  Future which completes when the StatefulSet is created, updated or deleted
-     */
-    protected Future<Void> statefulSet() {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            // StatefulSets are disabled => delete the StatefulSet if it exists
-            return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
-                    .compose(sts -> {
-                        if (sts != null)    {
-                            return stsOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), false);
-                        } else {
-                            return Future.succeededFuture();
-                        }
-                    });
-        } else {
-            // StatefulSets are enabled => make sure the StatefulSet exists with the right settings
-            StatefulSet zkSts = zk.generateStatefulSet(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets);
-            Annotations.annotations(zkSts.getSpec().getTemplate()).put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, String.valueOf(ModelUtils.caCertGeneration(this.clusterCa)));
-            Annotations.annotations(zkSts.getSpec().getTemplate()).put(Annotations.ANNO_STRIMZI_LOGGING_HASH, loggingHash);
-            return stsOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), zkSts)
-                    .compose(rr -> {
-                        statefulSetDiff = rr;
+    protected Future<Void> migrateFromStatefulSetToPodSet() {
+        // Delete the StatefulSet if it exists
+        return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
+                .compose(sts -> {
+                    if (sts != null)    {
+                        return stsOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), false);
+                    } else {
                         return Future.succeededFuture();
-                    });
-        }
+                    }
+                });
     }
 
     /**
@@ -571,27 +497,27 @@ public class ZooKeeperReconciler {
      * @return          Future which completes when the PodSet is created or updated
      */
     private Future<Void> podSet(int replicas) {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            Map<String, String> podAnnotations = new LinkedHashMap<>(2);
-            podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, String.valueOf(ModelUtils.caCertGeneration(this.clusterCa)));
-            podAnnotations.put(Annotations.ANNO_STRIMZI_LOGGING_HASH, loggingHash);
+        StrimziPodSet zkPodSet = zk.generatePodSet(replicas, pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::zkPodSetPodAnnotations);
+        return strimziPodSetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), zkPodSet)
+                .compose(rr -> {
+                    podSetDiff = rr;
+                    return Future.succeededFuture();
+                });
+    }
 
-            StrimziPodSet zkPodSet = zk.generatePodSet(replicas, pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, podAnnotations);
-            return strimziPodSetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), zkPodSet)
-                    .compose(rr -> {
-                        podSetDiff = rr;
-                        return Future.succeededFuture();
-                    });
-        } else {
-            return strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()))
-                    .compose(podSet -> {
-                        if (podSet != null)    {
-                            return strimziPodSetOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), false);
-                        } else {
-                            return Future.succeededFuture();
-                        }
-                    });
-        }
+    /**
+     * Prepares annotations for ZooKeeper pods within a StrimziPodSet.
+     *
+     * @param podNum Number of the ZooKeeper pod, the annotations of which are being prepared.
+     * @return Map with Pod annotations
+     */
+    public Map<String, String> zkPodSetPodAnnotations(int podNum) {
+        Map<String, String> podAnnotations = new LinkedHashMap<>((int) Math.ceil(podNum / 0.75));
+        podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, String.valueOf(ModelUtils.caCertGeneration(this.clusterCa)));
+        podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, String.valueOf(ModelUtils.caKeyGeneration(this.clusterCa)));
+        podAnnotations.put(Annotations.ANNO_STRIMZI_LOGGING_HASH, loggingHash);
+        podAnnotations.put(ANNO_STRIMZI_SERVER_CERT_HASH, zkCertificateHash.get(podNum));
+        return podAnnotations;
     }
 
     /**
@@ -704,7 +630,7 @@ public class ZooKeeperReconciler {
                             IntStream.rangeClosed(0, current - 1).mapToObj(i -> KafkaResources.zookeeperPodName(reconciliation.name(), i)).collect(Collectors.toList())
                     )
                     .compose(i -> zkScaler.scale(current - 1))
-                    .compose(i -> scaleDownStatefulSetOrPodSet(current - 1))
+                    .compose(i -> scaleDownPodSet(current - 1))
                     .compose(i -> scaleDownByOne(zkScaler, current - 1, desired));
         } else {
             return Future.succeededFuture();
@@ -712,42 +638,41 @@ public class ZooKeeperReconciler {
     }
 
     /**
-     * Scales-down the ZooKeeper StatefulSet or PodSet, depending on what is used. This method only updates the
-     * StatefulSet or PodSet, it does not handle the pods or ZooKeeper configuration.
+     * Scales-down the ZooKeeper PodSet, depending on what is used. This method only updates the PodSet, it does not
+     * handle the pods or ZooKeeper configuration.
      *
-     * @return  Future which completes when StatefulSet or PodSet are scaled-down.
+     * @return  Future which completes when PodSet is scaled-down.
      */
-    private Future<Void> scaleDownStatefulSetOrPodSet(int desiredScale)   {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            return podSet(desiredScale)
-                    // We wait for the pod to be deleted, otherwise it might disrupt the rolling update
-                    .compose(ignore -> podOperator.waitFor(
-                            reconciliation,
-                            reconciliation.namespace(),
-                            KafkaResources.zookeeperPodName(reconciliation.name(), desiredScale),
-                            "to be deleted",
-                            1_000L,
-                            operationTimeoutMs,
-                            (podNamespace, podName) -> podOperator.get(podNamespace, podName) == null)
-                    );
-        } else {
-            return stsOperator.scaleDown(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), desiredScale)
-                    .map((Void) null);
-        }
+    private Future<Void> scaleDownPodSet(int desiredScale)   {
+        return podSet(desiredScale)
+                // We wait for the pod to be deleted, otherwise it might disrupt the rolling update
+                .compose(ignore -> podOperator.waitFor(
+                        reconciliation,
+                        reconciliation.namespace(),
+                        KafkaResources.zookeeperPodName(reconciliation.name(), desiredScale),
+                        "to be deleted",
+                        1_000L,
+                        operationTimeoutMs,
+                        (podNamespace, podName) -> podOperator.get(podNamespace, podName) == null)
+                );
     }
 
     /**
-     * General method for rolling update of the ZooKeeper cluster. This method handles the whether StatefulSets or
-     * PodSets are being used and calls other methods to execute the rolling update if needed.
+     * General method for rolling update of the ZooKeeper cluster.
      *
      * @return  Future which completes when any of the ZooKeeper pods which need rolling is rolled
      */
     protected Future<Void> rollingUpdate() {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            return maybeRollZooKeeper(pod -> ReconcilerUtils.reasonsToRestartPod(reconciliation, podSetDiff.resource(), pod, fsResizingRestartRequest, existingCertsChanged, clusterCa).getAllReasonNotes());
-        } else {
-            return maybeRollZooKeeper(pod -> ReconcilerUtils.reasonsToRestartPod(reconciliation, statefulSetDiff.resource(), pod, fsResizingRestartRequest, existingCertsChanged, clusterCa).getAllReasonNotes());
-        }
+        return maybeRollZooKeeper(pod ->
+                ReconcilerUtils.reasonsToRestartPod(
+                        reconciliation,
+                        podSetDiff.resource(),
+                        pod,
+                        fsResizingRestartRequest,
+                        ReconcilerUtils.trackedServerCertChanged(pod, zkCertificateHash),
+                        clusterCa)
+                        .getAllReasonNotes()
+        );
     }
 
     /**
@@ -778,7 +703,14 @@ public class ZooKeeperReconciler {
      */
     private Future<Void> maybeRollZooKeeper(Function<Pod, List<String>> podNeedsRestart, Secret clusterCaCertSecret, Secret coKeySecret) {
         return new ZooKeeperRoller(podOperator, zooLeaderFinder, operationTimeoutMs)
-                .maybeRollingUpdate(reconciliation, zk.getSelectorLabels(), podNeedsRestart, clusterCaCertSecret, coKeySecret);
+                .maybeRollingUpdate(
+                        reconciliation,
+                        currentReplicas > 0 && currentReplicas < zk.getReplicas() ? currentReplicas : zk.getReplicas(),
+                        zk.getSelectorLabels(),
+                        podNeedsRestart,
+                        clusterCaCertSecret,
+                        coKeySecret
+                );
     }
 
     /**
@@ -803,7 +735,7 @@ public class ZooKeeperReconciler {
      * General method which orchestrates ZooKeeper scale-up from N to M pods. This relies on other methods which scale
      * the pods one by one.
      *
-     * @return  Future which completes ZooKeeper scale-up is complete
+     * @return  Future which completes when the ZooKeeper scale-up is complete
      */
     protected Future<Void> scaleUp() {
         int desired = zk.getReplicas();
@@ -843,7 +775,7 @@ public class ZooKeeperReconciler {
      */
     private Future<Void> scaleUpByOne(ZookeeperScaler zkScaler, int current, int desired) {
         if (current < desired) {
-            return zkScaleUpStatefulSetOrPodSet(current + 1)
+            return zkScaleUpPodSet(current + 1)
                     .compose(ignore -> podOperator.readiness(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperPodName(reconciliation.name(), current), 1_000, operationTimeoutMs))
                     .compose(ignore -> zkScaler.scale(current + 1))
                     .compose(ignore -> scaleUpByOne(zkScaler, current + 1, desired));
@@ -853,18 +785,13 @@ public class ZooKeeperReconciler {
     }
 
     /**
-     * Scales-up the ZooKeeper StatefulSet or PodSet, depending on what is used. This method only updates the
-     * StatefulSet or PodSet, it does not handle the pods or ZooKeeper configuration.
+     * Scales-up the ZooKeeper PodSet. This method only updates the PodSet, it does not handle the pods or ZooKeeper
+     * configuration.
      *
-     * @return  Future which completes when StatefulSet or PodSet are scaled-up.
+     * @return  Future which completes when the PodSet is scaled-up.
      */
-    private Future<Void> zkScaleUpStatefulSetOrPodSet(int desiredScale)   {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            return podSet(desiredScale);
-        } else {
-            return stsOperator.scaleUp(reconciliation, reconciliation.namespace(), KafkaResources.zookeeperStatefulSetName(reconciliation.name()), desiredScale)
-                    .map((Void) null);
-        }
+    private Future<Void> zkScaleUpPodSet(int desiredScale)   {
+        return podSet(desiredScale);
     }
 
     /**
@@ -922,7 +849,7 @@ public class ZooKeeperReconciler {
      * this would not help after scale-downs. Therefore, we check if there are any PVCs which should not be present
      * and delete them when they are.
      *
-     * This should be called only after the StatefulSet reconciliation, rolling update and scale-down when the PVCs
+     * This should be called only after the StrimziPodSet reconciliation, rolling update and scale-down when the PVCs
      * are not used any more by the pods.
      *
      * @return  Future which completes when the PVCs which should be deleted are deleted

@@ -6,22 +6,18 @@
 package io.strimzi.operator.cluster.model;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.strimzi.api.kafka.model.KafkaClusterSpec;
 import io.strimzi.kafka.config.model.ConfigModel;
 import io.strimzi.kafka.config.model.ConfigModels;
-import io.strimzi.kafka.config.model.Scope;
 import io.strimzi.operator.common.Reconciliation;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyList;
 
@@ -29,10 +25,24 @@ import static java.util.Collections.emptyList;
  * Class for handling Kafka configuration passed by the user
  */
 public class KafkaConfiguration extends AbstractConfiguration {
-
+    /**
+     * Configuration key of the inter-broker protocol version option
+     */
     public static final String INTERBROKER_PROTOCOL_VERSION = "inter.broker.protocol.version";
+
+    /**
+     * Configuration key of the message format version option
+     */
     public static final String LOG_MESSAGE_FORMAT_VERSION = "log.message.format.version";
+
+    /**
+     * Configuration key of the default replication factor option
+     */
     public static final String DEFAULT_REPLICATION_FACTOR = "default.replication.factor";
+
+    /**
+     * Configuration key of the min-insync replicas version option
+     */
     public static final String MIN_INSYNC_REPLICAS = "min.insync.replicas";
 
     private static final List<String> FORBIDDEN_PREFIXES;
@@ -41,6 +51,156 @@ public class KafkaConfiguration extends AbstractConfiguration {
     static {
         FORBIDDEN_PREFIXES = AbstractConfiguration.splitPrefixesToList(KafkaClusterSpec.FORBIDDEN_PREFIXES);
         FORBIDDEN_PREFIX_EXCEPTIONS = AbstractConfiguration.splitPrefixesToList(KafkaClusterSpec.FORBIDDEN_PREFIX_EXCEPTIONS);
+    }
+
+    /**
+     * List of configuration options that are relevant to controllers and should be considered when deciding whether
+     * a controller-only node needs to be rolled or not.
+     */
+    private static final Set<String> CONTROLLER_RELEVANT_CONFIGS = Set.of(
+            "alter.config.policy.class.name",
+            "authorizer.class.name",
+            "auto.create.topics.enable",
+            "background.threads",
+            "broker.heartbeat.interval.ms",
+            "broker.rack",
+            "broker.session.timeout.ms",
+            "connection.failed.authentication.delay.ms",
+            "connections.max.idle.ms",
+            "connections.max.reauth.ms",
+            "controlled.shutdown.enable",
+            "controlled.shutdown.max.retries",
+            "controlled.shutdown.retry.backoff.ms",
+            "controller.listener.names",
+            "controller.quorum.append.linger.ms",
+            "controller.quorum.election.backoff.max.ms",
+            "controller.quorum.election.timeout.ms",
+            "controller.quorum.fetch.timeout.ms",
+            "controller.quorum.request.timeout.ms",
+            "controller.quorum.retry.backoff.ms",
+            "controller.quorum.voters",
+            "controller.quota.window.num",
+            "controller.quota.window.size.seconds",
+            "controller.socket.timeout.ms",
+            "create.topic.policy.class.name",
+            "default.replication.factor",
+            "delete.topic.enable",
+            "early.start.listeners",
+            "kafka.metrics.polling.interval.secs",
+            "kafka.metrics.reporters",
+            "leader.imbalance.check.interval.seconds",
+            "leader.imbalance.per.broker.percentage",
+            "listener.name.controlplane-9090.ssl.keystore.location",
+            "listener.name.controlplane-9090.ssl.keystore.password",
+            "listener.name.controlplane-9090.ssl.keystore.type",
+            "listener.name.controlplane-9090.ssl.truststore.location",
+            "listener.name.controlplane-9090.ssl.truststore.password",
+            "listener.name.controlplane-9090.ssl.truststore.type",
+            "listener.name.controlplane-9090.ssl.client.auth",
+            "listener.security.protocol.map",
+            "listeners",
+            "log.dir",
+            "log.dirs",
+            "min.insync.replicas",
+            "max.connection.creation.rate",
+            "max.connections.per.ip.overrides",
+            "max.connections.per.ip",
+            "max.connections",
+            "metadata.log.dir",
+            "metadata.log.max.record.bytes.between.snapshots",
+            "metadata.log.max.snapshot.interval.ms",
+            "metadata.log.segment.bytes",
+            "metadata.log.segment.min.bytes",
+            "metadata.log.segment.ms",
+            "metadata.max.idle.interval.ms",
+            "metadata.max.retention.bytes",
+            "metadata.max.retention.ms",
+            "metric.reporters",
+            "metrics.num.samples",
+            "metrics.recording.level",
+            "metrics.sample.window.ms",
+            "node.id",
+            "num.io.threads",
+            "num.network.threads",
+            "offsets.topic.replication.factor",
+            "principal.builder.class",
+            "process.roles",
+            "replica.selector.class",
+            "reserved.broker.max.id",
+            "sasl.enabled.mechanisms",
+            "sasl.kerberos.kinit.cmd",
+            "sasl.kerberos.min.time.before.relogin",
+            "sasl.kerberos.principal.to.local.rules",
+            "sasl.kerberos.service.name",
+            "sasl.kerberos.ticket.renew.jitter",
+            "sasl.kerberos.ticket.renew.window.factor",
+            "sasl.login.callback.handler.class",
+            "sasl.login.class",
+            "sasl.login.connect.timeout.ms",
+            "sasl.login.read.timeout.ms",
+            "sasl.login.refresh.buffer.seconds",
+            "sasl.login.refresh.min.period.seconds",
+            "sasl.login.refresh.window.factor",
+            "sasl.login.refresh.window.jitter",
+            "sasl.login.retry.backoff.max.ms",
+            "sasl.login.retry.backoff.ms",
+            "sasl.mechanism.controller.protocol",
+            "sasl.oauthbearer.clock.skew.seconds",
+            "sasl.oauthbearer.expected.audience",
+            "sasl.oauthbearer.expected.issuer",
+            "sasl.oauthbearer.jwks.endpoint.refresh.ms",
+            "sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms",
+            "sasl.oauthbearer.jwks.endpoint.retry.backoff.ms",
+            "sasl.oauthbearer.jwks.endpoint.url",
+            "sasl.oauthbearer.scope.claim.name",
+            "sasl.oauthbearer.sub.claim.name",
+            "sasl.oauthbearer.token.endpoint.url",
+            "sasl.server.callback.handler.class",
+            "sasl.server.max.receive.size",
+            "security.providers",
+            "server.max.startup.time.ms",
+            "socket.connection.setup.timeout.max.ms",
+            "socket.connection.setup.timeout.ms",
+            "socket.listen.backlog.size",
+            "socket.receive.buffer.bytes",
+            "socket.request.max.bytes",
+            "socket.send.buffer.bytes",
+            "ssl.cipher.suites",
+            "ssl.client.auth",
+            "ssl.enabled.protocols",
+            "ssl.endpoint.identification.algorithm",
+            "ssl.engine.factory.class",
+            "ssl.key.password",
+            "ssl.keymanager.algorithm",
+            "ssl.keystore.certificate.chain",
+            "ssl.keystore.key",
+            "ssl.keystore.location",
+            "ssl.keystore.password",
+            "ssl.keystore.type",
+            "ssl.principal.mapping.rules",
+            "ssl.protocol",
+            "ssl.provider",
+            "ssl.secure.random.implementation",
+            "ssl.trustmanager.algorithm",
+            "ssl.truststore.certificates",
+            "ssl.truststore.location",
+            "ssl.truststore.password",
+            "ssl.truststore.type",
+            "transaction.state.log.min.isr",
+            "transaction.state.log.replication.factor",
+            "queued.max.requests",
+            "queued.max.requests.bytes",
+            "unclean.leader.election.enable"
+    );
+
+    /**
+     * Copy constructor which creates new instance of the Kafka Configuration from existing configuration. It is
+     * useful when you need to modify an instance of the configuration without permanently changing the original.
+     *
+     * @param configuration     Existing configuration
+     */
+    public KafkaConfiguration(KafkaConfiguration configuration)   {
+        super(configuration);
     }
 
     /**
@@ -71,19 +231,6 @@ public class KafkaConfiguration extends AbstractConfiguration {
     }
 
     /**
-     * Returns a KafkaConfiguration created without forbidden option filtering.
-     *
-     * @param reconciliation The reconciliation
-     * @param map A map representation of the Properties
-     * @return The KafkaConfiguration
-     */
-    public static KafkaConfiguration unvalidated(Reconciliation reconciliation, Map<String, String> map) {
-        StringBuilder string = new StringBuilder();
-        map.entrySet().forEach(entry -> string.append(entry.getKey() + "=" + entry.getValue() + "\n"));
-        return new KafkaConfiguration(reconciliation, string.toString(), emptyList());
-    }
-
-    /**
      * Validate the configs in this KafkaConfiguration returning a list of errors.
      * @param kafkaVersion The broker version.
      * @return A list of error messages.
@@ -109,7 +256,6 @@ public class KafkaConfiguration extends AbstractConfiguration {
      * @param kafkaVersion The broker version.
      * @return The config model for that broker version.
      */
-    @SuppressFBWarnings({"RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"})
     public static Map<String, ConfigModel> readConfigModel(KafkaVersion kafkaVersion) {
         String name = "/kafka-" + kafkaVersion.version() + "-config-model.json";
         try {
@@ -131,67 +277,6 @@ public class KafkaConfiguration extends AbstractConfiguration {
     }
 
     /**
-     * Return true if the configs in this KafkaConfiguration include any which are read-only.
-     * @param kafkaVersion The broker version.
-     * @return true if the configs in this KafkaConfiguration include any which are read-only.
-     */
-    public boolean anyReadOnly(KafkaVersion kafkaVersion) {
-        Set<String> strings = readOnlyConfigs(kafkaVersion);
-        return !strings.isEmpty();
-    }
-
-    /**
-     * Return the configs in this KafkaConfiguration which are read-only.
-     * @param kafkaVersion The broker version.
-     * @return The read-only configs.
-     */
-    public Set<String> readOnlyConfigs(KafkaVersion kafkaVersion) {
-        return withScope(kafkaVersion, Scope.READ_ONLY);
-    }
-
-    /**
-     * Return the configs in this KafkaConfiguration which are cluster-wide.
-     * @param kafkaVersion The broker version.
-     * @return The cluster-wide configs.
-     */
-    public Set<String> clusterWideConfigs(KafkaVersion kafkaVersion) {
-        return withScope(kafkaVersion, Scope.CLUSTER_WIDE);
-    }
-
-    /**
-     * Return the configs in this KafkaConfiguration which are per-broker.
-     * @param kafkaVersion The broker version.
-     * @return The per-broker configs.
-     */
-    public Set<String> perBrokerConfigs(KafkaVersion kafkaVersion) {
-        return withScope(kafkaVersion, Scope.PER_BROKER);
-    }
-
-    private Set<String> withScope(KafkaVersion kafkaVersion, Scope scope) {
-        Map<String, ConfigModel> c = readConfigModel(kafkaVersion);
-        List<String> configsOfScope = c.entrySet().stream()
-                .filter(config -> scope.equals(config.getValue().getScope()))
-                .map(config -> config.getKey())
-                .collect(Collectors.toList());
-        Set<String> result = new HashSet<>(asOrderedProperties().asMap().keySet());
-        result.retainAll(configsOfScope);
-        return Collections.unmodifiableSet(result);
-    }
-
-    /**
-     * Return the configs in this KafkaConfiguration which are not known broker configs.
-     * These might be consumed by broker plugins.
-     * @param kafkaVersion The broker version.
-     * @return The unknown configs.
-     */
-    public Set<String> unknownConfigs(KafkaVersion kafkaVersion) {
-        Map<String, ConfigModel> c = readConfigModel(kafkaVersion);
-        Set<String> result = new HashSet<>(asOrderedProperties().asMap().keySet());
-        result.removeAll(c.keySet());
-        return result;
-    }
-
-    /**
      * Return the config properties with their values in this KafkaConfiguration which are not known broker configs.
      * These might be consumed by broker plugins.
      * @param kafkaVersion The broker version.
@@ -208,6 +293,27 @@ public class KafkaConfiguration extends AbstractConfiguration {
         return result;
     }
 
+    /**
+     * Return the config properties with their values in this KafkaConfiguration which are known to be relevant for the
+     * Kafka controller nodes.
+     *
+     * @return  The configuration options relevant for controllers
+     */
+    public Set<String> controllerConfigsWithValues() {
+        Set<String> result = new HashSet<>();
+
+        for (Map.Entry<String, String> e :this.asOrderedProperties().asMap().entrySet()) {
+            if (CONTROLLER_RELEVANT_CONFIGS.contains(e.getKey())) {
+                result.add(e.getKey() + "=" + e.getValue());
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * @return  True if the configuration is empty. False otherwise.
+     */
     public boolean isEmpty() {
         return this.asOrderedProperties().asMap().size() == 0;
     }

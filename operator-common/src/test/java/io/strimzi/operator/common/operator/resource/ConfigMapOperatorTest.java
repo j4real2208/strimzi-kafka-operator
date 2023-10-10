@@ -15,7 +15,7 @@ import io.vertx.core.Vertx;
 import static java.util.Collections.singletonMap;
 import static org.mockito.Mockito.when;
 
-public class ConfigMapOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, ConfigMap, ConfigMapList, Resource<ConfigMap>> {
+public class ConfigMapOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, ConfigMap, ConfigMapList, Resource<ConfigMap>> {
 
     @Override
     protected void  mocker(KubernetesClient mockClient, MixedOperation mockCms) {
@@ -23,7 +23,7 @@ public class ConfigMapOperatorTest extends AbstractResourceOperatorTest<Kubernet
     }
 
     @Override
-    protected AbstractResourceOperator<KubernetesClient, ConfigMap, ConfigMapList, Resource<ConfigMap>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
+    protected AbstractNamespacedResourceOperator<KubernetesClient, ConfigMap, ConfigMapList, Resource<ConfigMap>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
         return new ConfigMapOperator(vertx, mockClient);
     }
 
@@ -38,10 +38,10 @@ public class ConfigMapOperatorTest extends AbstractResourceOperatorTest<Kubernet
     }
 
     @Override
-    protected ConfigMap resource() {
+    protected ConfigMap resource(String name) {
         return new ConfigMapBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo", "bar"))
                 .endMetadata()
@@ -50,8 +50,8 @@ public class ConfigMapOperatorTest extends AbstractResourceOperatorTest<Kubernet
     }
 
     @Override
-    protected ConfigMap modifiedResource() {
-        return new ConfigMapBuilder(resource())
+    protected ConfigMap modifiedResource(String name) {
+        return new ConfigMapBuilder(resource(name))
                 .withData(singletonMap("FOO", "BAR2"))
                 .build();
     }

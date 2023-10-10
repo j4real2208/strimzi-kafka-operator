@@ -8,6 +8,7 @@ import javax.security.auth.x500.X500Principal;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -20,29 +21,71 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * Can be serialized as JSON.
  */
 public class Subject {
+    /**
+     * Builder class used to build the Subject instance
+     */
     public static class Builder {
-
         private String organizationName;
         private String commonName;
         private Set<String> dnsNames = null;
         private Set<String> ipAddresses = null;
 
+        /**
+         * Sets the Common Name
+         *
+         * @param commonName    Common Name
+         *
+         * @return  This instance of the Subject builder
+         */
         public Builder withCommonName(String commonName) {
             this.commonName = commonName;
             return this;
         }
+
+        /**
+         * Sets the Organization Name
+         *
+         * @param organizationName    Organization Name
+         *
+         * @return  This instance of the Subject builder
+         */
         public Builder withOrganizationName(String organizationName) {
             this.organizationName = organizationName;
             return this;
         }
+
+        /**
+         * Adds the name to the certificate subject as SAN. This creates a list with one item and delegates to the
+         * addDnsNames method.
+         *
+         * @param dnsName   DNS name
+         *
+         * @return  Instance of this builder
+         */
         public Builder addDnsName(String dnsName) {
-            if (!IpAndDnsValidation.isValidDnsNameOrWildcard(dnsName)) {
-                throw new IllegalArgumentException("Invalid DNS name: " + dnsName);
-            }
+            return addDnsNames(List.of(dnsName));
+        }
+
+        /**
+         * Adds one or more DNS names which will be used in the certificate subject for the SANs
+         *
+         * @param newDnsNames   List of DNS names
+         *
+         * @return  Instance of this builder
+         */
+        public Builder addDnsNames(List<String> newDnsNames)  {
             if (dnsNames == null) {
                 dnsNames = new HashSet<>();
             }
-            dnsNames.add(dnsName);
+
+            for (String newDnsName : newDnsNames)   {
+                if (!IpAndDnsValidation.isValidDnsNameOrWildcard(newDnsName)) {
+                    throw new IllegalArgumentException("Invalid DNS name: " + newDnsName);
+                }
+
+                dnsNames.add(newDnsName);
+            }
+
             return this;
         }
 
@@ -71,6 +114,9 @@ public class Subject {
             return this;
         }
 
+        /**
+         * @return  Instance of the Subject class created based on this builder
+         */
         public Subject build() {
             return new Subject(commonName, organizationName, dnsNames, ipAddresses);
         }
@@ -94,16 +140,25 @@ public class Subject {
         this.ipAddresses = ipAddresses == null ? Set.of() : Collections.unmodifiableSet(ipAddresses);
     }
 
+    /**
+     * @return  Organization name
+     */
     @JsonProperty
     public String organizationName() {
         return organizationName;
     }
 
+    /**
+     * @return  Common name
+     */
     @JsonProperty
     public String commonName() {
         return commonName;
     }
 
+    /**
+     * @return  X500Principal based on this subject
+     */
     public X500Principal principal() {
         if (commonName != null) {
             if (organizationName != null) {
@@ -120,11 +175,17 @@ public class Subject {
         }
     }
 
+    /**
+     * @return  Set of DNS names
+     */
     @JsonProperty
     public Set<String> dnsNames() {
         return dnsNames;
     }
 
+    /**
+     * @return  Set of IP addresses
+     */
     @JsonProperty
     public Set<String> ipAddresses() {
         return ipAddresses;
@@ -156,6 +217,9 @@ public class Subject {
                 ')';
     }
 
+    /**
+     * @return  Map with the SANs
+     */
     public Map<String, String> subjectAltNames() {
         Map<String, String> san = new HashMap<>();
         int i = 0;
@@ -169,6 +233,9 @@ public class Subject {
         return san;
     }
 
+    /**
+     * @return  True if any SANs are present. False otherwise.
+     */
     public boolean hasSubjectAltNames() {
         return !dnsNames().isEmpty() || !ipAddresses().isEmpty();
     }

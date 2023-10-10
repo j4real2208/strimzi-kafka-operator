@@ -25,6 +25,16 @@ public abstract class AbstractConfiguration {
     private final OrderedProperties options = new OrderedProperties();
 
     /**
+     * Copy constructor which creates new instance of the Abstract Configuration from existing configuration. It is
+     * useful when you need to modify an instance of the configuration without permanently changing the original.
+     *
+     * @param configuration     Existing configuration
+     */
+    public AbstractConfiguration(AbstractConfiguration configuration)   {
+        options.addMapPairs(configuration.asOrderedProperties().asMap());
+    }
+
+    /**
      * Constructor used to instantiate this class from String configuration. Should be used to create configuration
      * from the Assembly.
      *
@@ -146,18 +156,44 @@ public abstract class AbstractConfiguration {
         this.filterForbidden(reconciliation, forbiddenPrefixes, Collections.emptyList());
     }
 
+    /**
+     * Returns a value for a specific config option
+     *
+     * @param configOption  Config option which should be looked-up
+     *
+     * @return  The configured value for this option
+     */
     public String getConfigOption(String configOption) {
         return options.asMap().get(configOption);
     }
 
+    /**
+     * Returns a value for a specific config option or a default value
+     *
+     * @param configOption  Config option which should be looked-up
+     * @param defaultValue  Default value
+     *
+     * @return  The configured value for this option or the default value if given option is not configured
+     */
     public String getConfigOption(String configOption, String defaultValue) {
         return options.asMap().getOrDefault(configOption, defaultValue);
     }
 
+    /**
+     * Sets config option
+     *
+     * @param configOption  Configuration option which should be set
+     * @param value         The value to which it should be set
+     */
     public void setConfigOption(String configOption, String value) {
         options.asMap().put(configOption, value);
     }
 
+    /**
+     * Removes a configuration option from the configuration
+     *
+     * @param configOption  Configuration option which should be removed
+     */
     public void removeConfigOption(String configOption) {
         options.asMap().remove(configOption);
     }

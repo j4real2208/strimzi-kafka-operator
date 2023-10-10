@@ -16,7 +16,7 @@ public class DnsNameGenerator {
 
     // cluster.local is the default DNS domain for Kubernetes, if modified a user must provide the custom domain
     // via the KUBERNETES_SERVICE_DNS_DOMAIN environment variable
-    public static final String KUBERNETES_SERVICE_DNS_DOMAIN =
+    private static final String KUBERNETES_SERVICE_DNS_DOMAIN =
             System.getenv().getOrDefault("KUBERNETES_SERVICE_DNS_DOMAIN", "cluster.local");
 
     private DnsNameGenerator(String namespace, String serviceName) {
@@ -24,6 +24,14 @@ public class DnsNameGenerator {
         this.serviceName = serviceName;
     }
 
+    /**
+     * Creates the DnsNameGenerator instance from namespace and service name
+     *
+     * @param namespace     Namespace of the service
+     * @param serviceName   Name of the service
+     *
+     * @return  DnsNameGenerator instance
+     */
     public static DnsNameGenerator of(String namespace, String serviceName) {
         if (namespace == null || namespace.isEmpty() || serviceName == null || serviceName.isEmpty()) {
             throw new IllegalArgumentException();
@@ -36,7 +44,7 @@ public class DnsNameGenerator {
      * (i.e. usually with the cluster.local - but can be different on different clusters)
      * Example: my-pod-1.my-service.my-ns.svc.cluster.local
      *
-     * Note: Conventionally this would only be used for pods with deterministic names such as statefulset pods
+     * Note: Conventionally this would only be used for pods with deterministic names such as StrimziPodSet pods
      *
      * @param podName       Name of the pod
      *
@@ -48,6 +56,15 @@ public class DnsNameGenerator {
                 serviceDnsName());
     }
 
+    /**
+     * Generates a DNS name of a Pod
+     *
+     * @param namespace     Namespace of the Pod
+     * @param serviceName   Name of the headless service
+     * @param podName       Name of the Pod
+     *
+     * @return  Pod DNS name
+     */
     public static String podDnsName(String namespace, String serviceName, String podName) {
         return DnsNameGenerator.of(namespace, serviceName)
                 .podDnsName(podName);
@@ -58,7 +75,7 @@ public class DnsNameGenerator {
      * (i.e. usually without the cluster.local - but can be different on different clusters)
      * Example: my-cluster-pod-1.my-cluster-service.my-ns.svc
      *
-     * Note: Conventionally this would only be used for pods with deterministic names such as statefulset pods
+     * Note: Conventionally this would only be used for pods with deterministic names such as StrimziPodSet pods
      *
      * @param podName       Name of the pod
      *

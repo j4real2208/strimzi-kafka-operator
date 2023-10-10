@@ -9,6 +9,10 @@ import io.fabric8.kubernetes.api.model.HTTPHeader;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.strimzi.operator.cluster.model.CruiseControl;
 import io.strimzi.operator.common.Util;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlEndpoints;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlParameters;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlRebalanceKeys;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlUserTaskStatus;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -26,17 +30,33 @@ import java.net.NoRouteToHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeoutException;
 
+/**
+ * Implementation of the Cruise Control API client
+ */
 public class CruiseControlApiImpl implements CruiseControlApi {
+    /**
+     * Default timeout for the HTTP client (-1 means use the clients default)
+     */
+    public static final int HTTP_DEFAULT_IDLE_TIMEOUT_SECONDS = -1;
     private static final boolean HTTP_CLIENT_ACTIVITY_LOGGING = false;
-    public static final int HTTP_DEFAULT_IDLE_TIMEOUT_SECONDS = -1; // use default internal HTTP client timeout
     private static final String STATUS_KEY = "Status";
 
     private final Vertx vertx;
     private final long idleTimeout;
-    private boolean apiSslEnabled;
-    private HTTPHeader authHttpHeader;
-    private PemTrustOptions pto;
+    private final boolean apiSslEnabled;
+    private final HTTPHeader authHttpHeader;
+    private final PemTrustOptions pto;
 
+    /**
+     * Constructor
+     *
+     * @param vertx             Vert.x instance
+     * @param idleTimeout       Idle timeout
+     * @param ccSecret          Cruise Control Secret
+     * @param ccApiSecret       Cruise Control API Secret
+     * @param apiAuthEnabled    Flag indicating if authentication is enabled
+     * @param apiSslEnabled     Flag indicating if TLS is enabled
+     */
     public CruiseControlApiImpl(Vertx vertx, int idleTimeout, Secret ccSecret, Secret ccApiSecret, Boolean apiAuthEnabled, boolean apiSslEnabled) {
         this.vertx = vertx;
         this.idleTimeout = idleTimeout;
@@ -50,7 +70,7 @@ public class CruiseControlApiImpl implements CruiseControlApi {
         return getCruiseControlState(host, port, verbose, null);
     }
 
-    public HttpClientOptions getHttpClientOptions() {
+    private HttpClientOptions getHttpClientOptions() {
         if (apiSslEnabled) {
             return new HttpClientOptions()
                 .setLogActivity(HTTP_CLIENT_ACTIVITY_LOGGING)
@@ -72,18 +92,17 @@ public class CruiseControlApiImpl implements CruiseControlApi {
         return new HTTPHeader(headerName, headerValue);
     }
 
-    public static HTTPHeader getAuthHttpHeader(boolean apiAuthEnabled, Secret apiSecret) {
+    protected static HTTPHeader getAuthHttpHeader(boolean apiAuthEnabled, Secret apiSecret) {
         if (apiAuthEnabled) {
             String password = new String(Util.decodeFromSecret(apiSecret, CruiseControl.API_ADMIN_PASSWORD_KEY), StandardCharsets.US_ASCII);
-            HTTPHeader header = generateAuthHttpHeader(CruiseControl.API_ADMIN_NAME, password);
-            return header;
+            return generateAuthHttpHeader(CruiseControl.API_ADMIN_NAME, password);
         } else {
             return null;
         }
     }
 
     @SuppressWarnings("deprecation")
-    public Future<CruiseControlResponse> getCruiseControlState(String host, int port, boolean verbose, String userTaskId) {
+    private Future<CruiseControlResponse> getCruiseControlState(String host, int port, boolean verbose, String userTaskId) {
 
         String path = new PathBuilder(CruiseControlEndpoints.STATE)
                 .withParameter(CruiseControlParameters.JSON, "true")
@@ -202,7 +221,7 @@ public class CruiseControlApiImpl implements CruiseControlApi {
                             } else {
                                 result.fail(new CruiseControlRestException(
                                         "Error for request: " + host + ":" + port + path + ". Server returned: " +
-                                                json.toString()));
+                                                json));
                             }
                         });
                     } else {

@@ -4,46 +4,52 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.fabric8.kubernetes.api.model.ConfigMap;
-import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.api.model.Secret;
-import io.fabric8.kubernetes.api.model.apps.StatefulSet;
-import io.fabric8.kubernetes.api.model.policy.v1.PodDisruptionBudget;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import io.fabric8.kubernetes.api.model.rbac.ClusterRoleBinding;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.strimzi.api.kafka.KafkaNodePoolList;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.StrimziPodSetBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListener;
+import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
+import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolBuilder;
+import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolStatus;
+import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolStatusBuilder;
+import io.strimzi.api.kafka.model.status.Condition;
 import io.strimzi.api.kafka.model.status.KafkaStatus;
 import io.strimzi.api.kafka.model.status.ListenerAddress;
 import io.strimzi.api.kafka.model.status.ListenerAddressBuilder;
 import io.strimzi.api.kafka.model.status.ListenerStatus;
-import io.strimzi.api.kafka.model.storage.JbodStorage;
+import io.strimzi.api.kafka.model.status.UsedNodePoolStatus;
+import io.strimzi.api.kafka.model.status.UsedNodePoolStatusBuilder;
 import io.strimzi.api.kafka.model.storage.Storage;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
-import io.strimzi.operator.cluster.FeatureGates;
-import io.strimzi.operator.cluster.model.AbstractModel;
-import io.strimzi.operator.cluster.model.Ca;
-import io.strimzi.operator.cluster.model.ClientsCa;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.cluster.model.CertUtils;
+import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.cluster.model.ClusterCa;
 import io.strimzi.operator.cluster.model.ImagePullPolicy;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaConfiguration;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.KafkaVersionChange;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.ModelUtils;
-import io.strimzi.operator.cluster.model.NodeUtils;
+import io.strimzi.operator.cluster.model.NodeRef;
+import io.strimzi.operator.common.model.NodeUtils;
 import io.strimzi.operator.cluster.model.PodSetUtils;
 import io.strimzi.operator.cluster.model.RestartReason;
 import io.strimzi.operator.cluster.model.RestartReasons;
-import io.strimzi.operator.cluster.model.StorageDiff;
+import io.strimzi.operator.common.model.StatusDiff;
+import io.strimzi.operator.cluster.model.nodepools.NodePoolUtils;
 import io.strimzi.operator.cluster.operator.resource.ConcurrentDeletionException;
 import io.strimzi.operator.cluster.operator.resource.KafkaRoller;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
@@ -52,19 +58,19 @@ import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEve
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.BackOff;
-import io.strimzi.operator.common.MetricsAndLogging;
+import io.strimzi.operator.cluster.model.MetricsAndLogging;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.Labels;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.operator.resource.ClusterRoleBindingOperator;
 import io.strimzi.operator.common.operator.resource.ConfigMapOperator;
+import io.strimzi.operator.common.operator.resource.CrdOperator;
 import io.strimzi.operator.common.operator.resource.IngressOperator;
-import io.strimzi.operator.common.operator.resource.IngressV1Beta1Operator;
 import io.strimzi.operator.common.operator.resource.NetworkPolicyOperator;
 import io.strimzi.operator.common.operator.resource.NodeOperator;
 import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetOperator;
-import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetV1Beta1Operator;
 import io.strimzi.operator.common.operator.resource.PodOperator;
 import io.strimzi.operator.common.operator.resource.PvcOperator;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
@@ -74,7 +80,6 @@ import io.strimzi.operator.common.operator.resource.ServiceAccountOperator;
 import io.strimzi.operator.common.operator.resource.ServiceOperator;
 import io.strimzi.operator.common.operator.resource.StorageClassOperator;
 import io.strimzi.operator.common.operator.resource.StrimziPodSetOperator;
-import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
@@ -83,19 +88,20 @@ import org.apache.kafka.common.KafkaException;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
-import static io.strimzi.operator.cluster.model.AbstractModel.ANNO_STRIMZI_IO_STORAGE;
 import static io.strimzi.operator.cluster.model.KafkaCluster.ANNO_STRIMZI_IO_KAFKA_VERSION;
+import static io.strimzi.operator.common.Annotations.ANNO_STRIMZI_SERVER_CERT_HASH;
 
 /**
  * Class used for reconciliation of Kafka. This class contains both the steps of the Kafka
@@ -110,15 +116,15 @@ public class KafkaReconciler {
     private final Vertx vertx;
     private final long operationTimeoutMs;
     /* test */ final KafkaCluster kafka;
-    private final Storage oldStorage;
+    private final List<KafkaNodePool> kafkaNodePoolCrs;
     private final ClusterCa clusterCa;
     private final ClientsCa clientsCa;
     private final List<String> maintenanceWindows;
     private final String operatorNamespace;
     private final Labels operatorNamespaceLabels;
     private final boolean isNetworkPolicyGeneration;
+    private final boolean isKafkaNodePoolsEnabled;
     /* test */ final PlatformFeaturesAvailability pfa;
-    private final FeatureGates featureGates;
     private final ImagePullPolicy imagePullPolicy;
     private final List<LocalObjectReference> imagePullSecrets;
 
@@ -128,33 +134,28 @@ public class KafkaReconciler {
     private final ServiceAccountOperator serviceAccountOperator;
     /* test */ final ServiceOperator serviceOperator;
     private final PvcOperator pvcOperator;
+    private final PreventBrokerScaleDownCheck brokerScaleDownOperations;
     private final StorageClassOperator storageClassOperator;
     private final ConfigMapOperator configMapOperator;
     private final NetworkPolicyOperator networkPolicyOperator;
     private final PodDisruptionBudgetOperator podDisruptionBudgetOperator;
-    private final PodDisruptionBudgetV1Beta1Operator podDisruptionBudgetV1Beta1Operator;
     private final PodOperator podOperator;
     private final ClusterRoleBindingOperator clusterRoleBindingOperator;
     /* test */ final RouteOperator routeOperator;
     /* test */ final IngressOperator ingressOperator;
-    /* test */ final IngressV1Beta1Operator ingressV1Beta1Operator;
     private final NodeOperator nodeOperator;
+    private final CrdOperator<KubernetesClient, KafkaNodePool, KafkaNodePoolList> kafkaNodePoolOperator;
 
     private final KubernetesRestartEventPublisher eventsPublisher;
 
     private final AdminClientProvider adminClientProvider;
 
-    private final int currentReplicas;
-
     private final Set<String> fsResizingRestartRequest = new HashSet<>();
-    private ReconcileResult<StatefulSet> statefulSetDiff;
-    private ReconcileResult<StrimziPodSet> podSetDiff;
-    private boolean existingCertsChanged = false;
     private String logging = "";
     private String loggingHash = "";
+    private final boolean skipBrokerScaleDownCheck;
     private final Map<Integer, String> brokerConfigurationHash = new HashMap<>();
-    @SuppressFBWarnings(value = "SS_SHOULD_BE_STATIC", justification = "Field cannot be static in inner class in Java 11")
-    private final int sharedConfigurationId = -1; // "Fake" broker ID used to indicate hash stored for all brokers when shared configuration is used
+    private final Map<Integer, String> kafkaServerCertificateHash = new HashMap<>();
 
     // Result of the listener reconciliation with the listener details
     /* test */ KafkaListenersReconciler.ReconciliationResult listenerReconciliationResults;
@@ -164,8 +165,11 @@ public class KafkaReconciler {
      *
      * @param reconciliation            Reconciliation marker
      * @param kafkaCr                   The Kafka custom resource
-     * @param oldStorage                The storage configuration of the current cluster (null if it does not exist yet)
-     * @param currentReplicas           The current number of replicas
+     * @param nodePools                 List of KafkaNodePool resources belonging to this cluster
+     * @param oldStorage                Maps with old storage configurations, where the key is the name of the controller
+     *                                  resource (e.g. my-cluster-pool-a) and the value is the current storage configuration.
+     * @param currentPods               Map with current pods, where the key is the name of the controller resource
+     *                                  (e.g. my-cluster-pool-a) and the value is a list with Pod names
      * @param clusterCa                 The Cluster CA instance
      * @param clientsCa                 The Clients CA instance
      * @param versionChange             Description of Kafka upgrade / downgrade state
@@ -177,8 +181,9 @@ public class KafkaReconciler {
     public KafkaReconciler(
             Reconciliation reconciliation,
             Kafka kafkaCr,
-            Storage oldStorage,
-            int currentReplicas,
+            List<KafkaNodePool> nodePools,
+            Map<String, Storage> oldStorage,
+            Map<String, List<String>> currentPods,
             ClusterCa clusterCa,
             ClientsCa clientsCa,
             KafkaVersionChange versionChange,
@@ -190,34 +195,42 @@ public class KafkaReconciler {
         this.reconciliation = reconciliation;
         this.vertx = vertx;
         this.operationTimeoutMs = config.getOperationTimeoutMs();
-        this.kafka = KafkaCluster.fromCrd(reconciliation, kafkaCr, config.versions(), oldStorage, currentReplicas, config.featureGates().useKRaftEnabled());
+        this.kafkaNodePoolCrs = nodePools;
+
+        boolean isKRaftEnabled = config.featureGates().useKRaftEnabled() && ReconcilerUtils.kraftEnabled(kafkaCr);
+        // We prepare the KafkaPool models and create the KafkaCluster model
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePools, oldStorage, currentPods, isKRaftEnabled, supplier.sharedEnvironmentProvider);
+        String clusterId = isKRaftEnabled ? NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePools) : NodePoolUtils.getClusterIdIfSet(kafkaCr, nodePools);
+        this.kafka = KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, config.versions(), isKRaftEnabled, clusterId, supplier.sharedEnvironmentProvider);
 
         // We set the user-configured inter.broker.protocol.version if needed (when not set by the user)
-        if (versionChange.interBrokerProtocolVersion() != null) {
+        // It is set only in ZooKeeper-mode since in Kraft mode it is ignored and throws warnings
+        if (!isKRaftEnabled && versionChange.interBrokerProtocolVersion() != null) {
             this.kafka.setInterBrokerProtocolVersion(versionChange.interBrokerProtocolVersion());
         }
 
         // We set the user-configured log.message.format.version if needed (when not set by the user)
-        if (versionChange.logMessageFormatVersion() != null) {
+        // It is set only in ZooKeeper-mode since in Kraft mode it is ignored and throws warnings
+        if (!isKRaftEnabled && versionChange.logMessageFormatVersion() != null) {
             this.kafka.setLogMessageFormatVersion(versionChange.logMessageFormatVersion());
         }
 
-        this.oldStorage = oldStorage;
-        this.currentReplicas = currentReplicas;
         this.clusterCa = clusterCa;
         this.clientsCa = clientsCa;
         this.maintenanceWindows = kafkaCr.getSpec().getMaintenanceTimeWindows();
         this.operatorNamespace = config.getOperatorNamespace();
         this.operatorNamespaceLabels = config.getOperatorNamespaceLabels();
         this.isNetworkPolicyGeneration = config.isNetworkPolicyGeneration();
+        this.isKafkaNodePoolsEnabled = config.featureGates().kafkaNodePoolsEnabled() && ReconcilerUtils.nodePoolsEnabled(kafkaCr);
         this.pfa = pfa;
-        this.featureGates = config.featureGates();
         this.imagePullPolicy = config.getImagePullPolicy();
         this.imagePullSecrets = config.getImagePullSecrets();
+        this.skipBrokerScaleDownCheck = Annotations.booleanAnnotation(kafkaCr, Annotations.ANNO_STRIMZI_IO_SKIP_BROKER_SCALEDOWN_CHECK, false);
 
         this.stsOperator = supplier.stsOperations;
         this.strimziPodSetOperator = supplier.strimziPodSetOperator;
         this.secretOperator = supplier.secretOperations;
+        this.brokerScaleDownOperations = supplier.brokerScaleDownOperations;
         this.serviceAccountOperator = supplier.serviceAccountOperations;
         this.serviceOperator = supplier.serviceOperations;
         this.pvcOperator = supplier.pvcOperations;
@@ -225,13 +238,12 @@ public class KafkaReconciler {
         this.configMapOperator = supplier.configMapOperations;
         this.networkPolicyOperator = supplier.networkPolicyOperator;
         this.podDisruptionBudgetOperator = supplier.podDisruptionBudgetOperator;
-        this.podDisruptionBudgetV1Beta1Operator = supplier.podDisruptionBudgetV1Beta1Operator;
         this.podOperator = supplier.podOperations;
         this.clusterRoleBindingOperator = supplier.clusterRoleBindingOperator;
         this.routeOperator = supplier.routeOperations;
         this.ingressOperator = supplier.ingressOperations;
-        this.ingressV1Beta1Operator = supplier.ingressV1Beta1Operations;
         this.nodeOperator = supplier.nodeOperator;
+        this.kafkaNodePoolOperator = supplier.kafkaNodePoolOperator;
         this.eventsPublisher = supplier.restartEventsPublisher;
 
         this.adminClientProvider = supplier.adminClientProvider;
@@ -249,34 +261,50 @@ public class KafkaReconciler {
      */
     public Future<Void> reconcile(KafkaStatus kafkaStatus, Clock clock)    {
         return modelWarnings(kafkaStatus)
+                .compose(i -> brokerScaleDownCheck())
                 .compose(i -> manualPodCleaning())
                 .compose(i -> networkPolicy())
                 .compose(i -> manualRollingUpdate())
-                .compose(i -> pvcs())
+                .compose(i -> pvcs(kafkaStatus))
                 .compose(i -> serviceAccount())
                 .compose(i -> initClusterRoleBinding())
                 .compose(i -> scaleDown())
+                .compose(i -> updateNodePoolStatuses(kafkaStatus))
                 .compose(i -> listeners())
                 .compose(i -> certificateSecret(clock))
                 .compose(i -> brokerConfigurationConfigMaps())
                 .compose(i -> jmxSecret())
                 .compose(i -> podDisruptionBudget())
-                .compose(i -> podDisruptionBudgetV1Beta1())
-                .compose(i -> statefulSet())
+                .compose(i -> migrateFromStatefulSetToPodSet())
                 .compose(i -> podSet())
-                .compose(i -> rollToAddOrRemoveVolumes())
-                .compose(i -> rollingUpdate())
-                .compose(i -> scaleUp())
+                .compose(podSetDiffs -> rollingUpdate(podSetDiffs)) // We pass the PodSet reconciliation result this way to avoid storing it in the instance
                 .compose(i -> podsReady())
                 .compose(i -> serviceEndpointsReady())
                 .compose(i -> headlessServiceEndpointsReady())
                 .compose(i -> clusterId(kafkaStatus))
                 .compose(i -> deletePersistentClaims())
-                .compose(i -> brokerConfigurationConfigMapsCleanup())
+                .compose(i -> sharedKafkaConfigurationCleanup())
                 // This has to run after all possible rolling updates which might move the pods to different nodes
                 .compose(i -> nodePortExternalListenerStatus())
-                .compose(i -> addListenersToKafkaStatus(kafkaStatus));
+                .compose(i -> addListenersToKafkaStatus(kafkaStatus))
+                .compose(i -> updateKafkaVersion(kafkaStatus));
     }
+
+    protected Future<Void> brokerScaleDownCheck() {
+        if (skipBrokerScaleDownCheck || kafka.removedNodes().isEmpty()) {
+            return Future.succeededFuture();
+        } else {
+            return brokerScaleDownOperations.canScaleDownBrokers(reconciliation, vertx, kafka.removedNodes(), secretOperator, adminClientProvider)
+                    .compose(brokersContainingPartitions -> {
+                        if (!brokersContainingPartitions.isEmpty()) {
+                            throw new InvalidResourceException("Cannot scale down brokers " + kafka.removedNodes() + " because brokers " + brokersContainingPartitions + " are not empty");
+                        } else {
+                            return Future.succeededFuture();
+                        }
+                    });
+        }
+    }
+
 
     /**
      * Takes the warning conditions from the Model and adds them in the KafkaStatus
@@ -286,7 +314,10 @@ public class KafkaReconciler {
      * @return              Completes when the warnings are added to the status object
      */
     protected Future<Void> modelWarnings(KafkaStatus kafkaStatus) {
-        kafkaStatus.addConditions(kafka.getWarningConditions());
+        List<Condition> conditions = kafka.getWarningConditions();
+
+        kafkaStatus.addConditions(conditions);
+
         return Future.succeededFuture();
     }
 
@@ -298,15 +329,11 @@ public class KafkaReconciler {
     protected Future<Void> manualPodCleaning() {
         return new ManualPodCleaner(
                 reconciliation,
-                KafkaResources.kafkaStatefulSetName(reconciliation.name()),
                 kafka.getSelectorLabels(),
-                operationTimeoutMs,
-                featureGates.useStrimziPodSetsEnabled(),
-                stsOperator,
                 strimziPodSetOperator,
                 podOperator,
                 pvcOperator
-        ).maybeManualPodCleaning(kafka.generatePersistentVolumeClaims(oldStorage));
+        ).maybeManualPodCleaning();
     }
 
     /**
@@ -324,72 +351,41 @@ public class KafkaReconciler {
     }
 
     /**
-     * Does manual rolling update of Kafka pods based on an annotation on the StatefulSet or on the Pods. Annotation
-     * on StatefulSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
-     * the selected pods. If the annotation is present on both StatefulSet and one or more pods, only one rolling
+     * Does manual rolling update of Kafka pods based on an annotation on the StrimziPodSet or on the Pods. Annotation
+     * on StrimziPodSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
+     * the selected pods. If the annotation is present on both StrimziPodSet and one or more pods, only one rolling
      * update of all pods occurs.
      *
      * @return  Future with the result of the rolling update
      */
     protected Future<Void> manualRollingUpdate() {
-        Future<HasMetadata> futureController;
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            futureController = strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                    .map(podSet -> podSet);  // The .map(...) is required to convert to HasMetadata
-        } else {
-            futureController = stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                    .map(sts -> sts);  // The .map(...) is required to convert to HasMetadata
-        }
+        Future<List<NodeRef>> podsToRollThroughPodSetAnno = podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation();
+        Future<List<NodeRef>> podsToRollThroughPodAnno = podsForManualRollingUpdateDiscoveredThroughPodAnnotations();
 
-        return futureController.compose(controller -> {
-            if (controller != null) {
-                if (Annotations.booleanAnnotation(controller, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
-                    // User trigger rolling update of the whole cluster
-                    return maybeRollKafka(kafka.getReplicas(), pod -> {
-                        if (pod == null) {
-                            throw new ConcurrentDeletionException("Unexpectedly pod no longer exists during roll of StatefulSet.");
-                        }
-                        LOGGER.debugCr(reconciliation, "Rolling Kafka pod {} due to manual rolling update annotation",
-                                pod.getMetadata().getName());
-                        return RestartReasons.of(RestartReason.MANUAL_ROLLING_UPDATE);
-                    }, Map.of(), Map.of(), false);
-                } else {
-                    // The controller is not annotated to roll all pods.
-                    // We should check if maybe the individual pods are annotated to restart only some of them.
-                    return kafkaManualPodRollingUpdate();
-                }
-            } else {
-                // Controller does not exist => nothing to roll
-                return Future.succeededFuture();
-            }
-        });
-    }
+        return Future
+                .join(podsToRollThroughPodSetAnno, podsToRollThroughPodAnno)
+                .compose(result -> {
+                    // We merge the lists into set to avoid duplicates
+                    Set<NodeRef> nodes = new LinkedHashSet<>();
+                    nodes.addAll(result.resultAt(0));
+                    nodes.addAll(result.resultAt(1));
 
-    /**
-     * Does rolling update of Kafka pods based on the annotation on Pod level
-     *
-     * @return  Future with the result of the rolling update
-     */
-    protected Future<Void> kafkaManualPodRollingUpdate() {
-        return podOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
-                .compose(pods -> {
-                    List<String> podsToRoll = new ArrayList<>(0);
+                    if (!nodes.isEmpty())   {
+                        return maybeRollKafka(
+                                nodes,
+                                pod -> {
+                                    if (pod == null) {
+                                        throw new ConcurrentDeletionException("Unexpectedly pod no longer exists during roll of StrimziPodSet.");
+                                    }
 
-                    for (Pod pod : pods)    {
-                        if (Annotations.booleanAnnotation(pod, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
-                            podsToRoll.add(pod.getMetadata().getName());
-                        }
-                    }
+                                    LOGGER.debugCr(reconciliation, "Rolling Kafka pod {} due to manual rolling update annotation", pod.getMetadata().getName());
 
-                    if (!podsToRoll.isEmpty())  {
-                        return maybeRollKafka(kafka.getReplicas(), pod -> {
-                            if (pod != null && podsToRoll.contains(pod.getMetadata().getName())) {
-                                LOGGER.debugCr(reconciliation, "Rolling Kafka pod {} due to manual rolling update annotation on a pod", pod.getMetadata().getName());
-                                return RestartReasons.of(RestartReason.MANUAL_ROLLING_UPDATE);
-                            } else {
-                                return RestartReasons.empty();
-                            }
-                        }, Map.of(), Map.of(), false);
+                                    return RestartReasons.of(RestartReason.MANUAL_ROLLING_UPDATE);
+                                },
+                                Map.of(),
+                                Map.of(),
+                                false
+                        );
                     } else {
                         return Future.succeededFuture();
                     }
@@ -397,9 +393,59 @@ public class KafkaReconciler {
     }
 
     /**
+     * Checks all Kafka PodSets and if they have the manual rolling update annotation, it will take all their nodes and
+     * add them to a list for rolling update.
+     *
+     * @return  List with node references to nodes which should be rolled
+     */
+    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation()   {
+        return strimziPodSetOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                .map(podSets -> {
+                    List<NodeRef> nodes = new ArrayList<>();
+
+                    for (StrimziPodSet podSet : podSets) {
+                        if (Annotations.booleanAnnotation(podSet, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
+                            nodes.addAll(ReconcilerUtils.nodesFromPodSet(podSet));
+                        }
+                    }
+
+                    if (!nodes.isEmpty()) {
+                        LOGGER.debugCr(reconciliation, "Pods {} will be rolled due to manual rolling update annotation on their StrimziPodSet", nodes);
+                    }
+
+                    return nodes;
+                });
+    }
+
+    /**
+     * Checks all Kafka Pods and if they have the manual rolling update annotation, it will add them to a list for
+     * rolling update.
+     *
+     * @return  List with node references to nodes which should be rolled
+     */
+    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodAnnotations()   {
+        return podOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                .map(pods -> {
+                    List<NodeRef> nodes = new ArrayList<>();
+
+                    for (Pod pod : pods) {
+                        if (Annotations.booleanAnnotation(pod, Annotations.ANNO_STRIMZI_IO_MANUAL_ROLLING_UPDATE, false)) {
+                            nodes.add(ReconcilerUtils.nodeFromPod(pod));
+                        }
+                    }
+
+                    if (!nodes.isEmpty()) {
+                        LOGGER.debugCr(reconciliation, "Pods {} will be rolled due to manual rolling update annotation on the Pod", nodes);
+                    }
+
+                    return nodes;
+                });
+    }
+
+    /**
      * Rolls Kafka pods if needed
      *
-     * @param replicas                  Number of Kafka replicas which should be considered for rolling
+     * @param nodes                     List of nodes which should be considered for rolling
      * @param podNeedsRestart           Function which serves as a predicate whether to roll pod or not
      * @param kafkaAdvertisedHostnames  Map with advertised hostnames required to generate the per-broker configuration
      * @param kafkaAdvertisedPorts      Map with advertised ports required to generate the per-broker configuration
@@ -408,7 +454,7 @@ public class KafkaReconciler {
      * @return  Future which completes when the rolling is complete
      */
     protected Future<Void> maybeRollKafka(
-            int replicas,
+            Set<NodeRef> nodes,
             Function<Pod, RestartReasons> podNeedsRestart,
             Map<Integer, Map<String, String>> kafkaAdvertisedHostnames,
             Map<Integer, Map<String, String>> kafkaAdvertisedPorts,
@@ -423,22 +469,15 @@ public class KafkaReconciler {
                                 1_000,
                                 operationTimeoutMs,
                                 () -> new BackOff(250, 2, 10),
-                                KafkaCluster.generatePodList(reconciliation.name(), replicas),
+                                nodes,
                                 compositeFuture.resultAt(0),
                                 compositeFuture.resultAt(1),
                                 adminClientProvider,
-                                brokerId -> {
-                                    if (featureGates.useStrimziPodSetsEnabled()) {
-                                        return kafka.generatePerBrokerBrokerConfiguration(brokerId, kafkaAdvertisedHostnames, kafkaAdvertisedPorts);
-                                    } else {
-                                        return kafka.generateSharedBrokerConfiguration();
-                                    }
-                                },
+                                brokerId -> kafka.generatePerBrokerConfiguration(brokerId, kafkaAdvertisedHostnames, kafkaAdvertisedPorts),
                                 logging,
                                 kafka.getKafkaVersion(),
                                 allowReconfiguration,
                                 eventsPublisher
-
                         ).rollingRestart(podNeedsRestart));
     }
 
@@ -446,13 +485,15 @@ public class KafkaReconciler {
      * Manages the PVCs needed by the Kafka cluster. This method only creates or updates the PVCs. Deletion of PVCs
      * after scale-down happens only at the end of the reconciliation when they are not used anymore.
      *
+     * @param kafkaStatus   Status of the Kafka custom resource where warnings about any issues with resizing will be added
+     *
      * @return  Completes when the PVCs were successfully created or updated
      */
-    protected Future<Void> pvcs() {
-        List<PersistentVolumeClaim> pvcs = kafka.generatePersistentVolumeClaims(kafka.getStorage());
+    protected Future<Void> pvcs(KafkaStatus kafkaStatus) {
+        List<PersistentVolumeClaim> pvcs = kafka.generatePersistentVolumeClaims();
 
         return new PvcReconciler(reconciliation, pvcOperator, storageClassOperator)
-                .resizeAndReconcilePvcs(podIndex -> KafkaResources.kafkaPodName(reconciliation.name(), podIndex), pvcs)
+                .resizeAndReconcilePvcs(kafkaStatus, podIndex -> KafkaResources.kafkaPodName(reconciliation.name(), podIndex), pvcs)
                 .compose(podsToRestart -> {
                     fsResizingRestartRequest.addAll(podsToRestart);
                     return Future.succeededFuture();
@@ -498,47 +539,44 @@ public class KafkaReconciler {
      * @return  Future which completes when the scale-down is finished
      */
     protected Future<Void> scaleDown() {
-        if (currentReplicas != 0
-                && currentReplicas > kafka.getReplicas()) {
-            // The previous (current) number of replicas is bigger than desired => we should scale-down
-            LOGGER.infoCr(reconciliation, "Scaling Kafka down from {} to {} replicas", currentReplicas, kafka.getReplicas());
+        LOGGER.debugCr(reconciliation, "Checking if Kafka scale-down is needed");
 
-            if (featureGates.useStrimziPodSetsEnabled())   {
-                Set<String> desiredPodNames = new HashSet<>(kafka.getReplicas());
-                for (int i = 0; i < kafka.getReplicas(); i++) {
-                    desiredPodNames.add(kafka.getPodName(i));
-                }
-
-                return strimziPodSetOperator.getAsync(reconciliation.namespace(), kafka.getName())
-                        .compose(podSet -> {
-                            if (podSet == null) {
-                                return Future.succeededFuture();
-                            } else {
-                                List<Map<String, Object>> desiredPods = podSet.getSpec().getPods().stream()
-                                        .filter(pod -> desiredPodNames.contains(PodSetUtils.mapToPod(pod).getMetadata().getName()))
-                                        .collect(Collectors.toList());
-
-                                StrimziPodSet scaledDownPodSet = new StrimziPodSetBuilder(podSet)
-                                        .editSpec()
-                                        .withPods(desiredPods)
-                                        .endSpec()
-                                        .build();
-
-                                return strimziPodSetOperator
-                                        .reconcile(reconciliation, reconciliation.namespace(), kafka.getName(), scaledDownPodSet)
-                                        .map((Void) null);
-                            }
-                        });
-            } else {
-                return stsOperator
-                        .scaleDown(reconciliation, reconciliation.namespace(), kafka.getName(), kafka.getReplicas())
-                        .map((Void) null);
-            }
-        } else {
-            // Previous replica count is unknown (because the PodSet / StatefulSet did not exist) or is smaller or equal to
-            // desired replicas => no need to scale-down
-            return Future.succeededFuture();
+        Set<String> desiredPodNames = new HashSet<>();
+        for (NodeRef node : kafka.nodes()) {
+            desiredPodNames.add(node.podName());
         }
+
+        return strimziPodSetOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                .compose(podSets -> {
+                    if (podSets == null) {
+                        return Future.succeededFuture();
+                    } else {
+                        List<Future<Void>> ops = new ArrayList<>();
+
+                        for (StrimziPodSet podSet : podSets) {
+                            List<Map<String, Object>> desiredPods = podSet.getSpec().getPods().stream()
+                                    .filter(pod -> desiredPodNames.contains(PodSetUtils.mapToPod(pod).getMetadata().getName()))
+                                    .collect(Collectors.toList());
+
+                            StrimziPodSet scaledDownPodSet = new StrimziPodSetBuilder(podSet)
+                                    .editSpec()
+                                    .withPods(desiredPods)
+                                    .endSpec()
+                                    .build();
+
+                            if (podSet.getSpec().getPods().size() > desiredPods.size())    {
+                                LOGGER.infoCr(reconciliation, "Scaling down Kafka pod set {} from {} to {} replicas", podSet.getMetadata().getName(), podSet.getSpec().getPods().size(), desiredPods.size());
+                                ops.add(
+                                        strimziPodSetOperator
+                                                .reconcile(reconciliation, reconciliation.namespace(), podSet.getMetadata().getName(), scaledDownPodSet)
+                                                .map((Void) null)
+                                );
+                            }
+                        }
+
+                        return Future.join(ops).map((Void) null);
+                    }
+                });
     }
 
     /**
@@ -557,8 +595,7 @@ public class KafkaReconciler {
                 secretOperator,
                 serviceOperator,
                 routeOperator,
-                ingressOperator,
-                ingressV1Beta1Operator
+                ingressOperator
         );
     }
 
@@ -577,50 +614,6 @@ public class KafkaReconciler {
     }
 
     /**
-     * Generates and creates the ConfigMap with shared configuration for Kafka brokers used in StatefulSets.
-     *
-     * @param metricsAndLogging     Metrics and Logging configuration
-     *
-     * @return  Future which completes when the Kafka Configuration is prepared
-     */
-    protected Future<Void> sharedKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
-        ConfigMap sharedCm = kafka.generateSharedConfigurationConfigMap(metricsAndLogging, listenerReconciliationResults.advertisedHostnames, listenerReconciliationResults.advertisedPorts);
-
-        // BROKER_ADVERTISED_HOSTNAMES_FILENAME or BROKER_ADVERTISED_PORTS_FILENAME have the advertised addresses.
-        // If they change, we need to roll the pods. Here we collect their hash to trigger the rolling update.
-        String brokerConfiguration = sharedCm.getData().getOrDefault(KafkaCluster.BROKER_ADVERTISED_HOSTNAMES_FILENAME, "");
-        brokerConfiguration += sharedCm.getData().getOrDefault(KafkaCluster.BROKER_ADVERTISED_PORTS_FILENAME, "");
-        brokerConfiguration += sharedCm.getData().getOrDefault(KafkaCluster.BROKER_LISTENERS_FILENAME, "");
-
-        // Changes to regular Kafka configuration are handled through the KafkaRoller which decides whether to roll the pod or not
-        // In addition to that, we have to handle changes to configuration unknown to Kafka -> different plugins (Authorization, Quotas etc.)
-        // This is captured here with the unknown configurations and the hash is used to roll the pod when it changes
-        KafkaConfiguration kc = KafkaConfiguration.unvalidated(reconciliation, sharedCm.getData().getOrDefault(KafkaCluster.BROKER_CONFIGURATION_FILENAME, ""));
-
-        // We store hash of the broker configurations for later use in StatefulSet / PodSet and in rolling updates
-        this.brokerConfigurationHash.put(sharedConfigurationId, Util.hashStub(brokerConfiguration + kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString()));
-
-        // This is used during Kafka rolling updates -> we have to store it for later
-        this.logging = sharedCm.getData().get(AbstractModel.ANCILLARY_CM_KEY_LOG_CONFIG);
-        this.loggingHash = Util.hashStub(Util.getLoggingDynamicallyUnmodifiableEntries(logging));
-
-        return configMapOperator
-                .reconcile(reconciliation, reconciliation.namespace(), kafka.getAncillaryConfigMapName(), sharedCm)
-                .map((Void) null);
-    }
-
-    /**
-     * Utility method to extract pod index number from pod name
-     *
-     * @param podName   Name of the pod
-     *
-     * @return          Index of the pod
-     */
-    private static int getPodIndexFromPodName(String podName)  {
-        return Integer.parseInt(podName.substring(podName.lastIndexOf("-") + 1));
-    }
-
-    /**
      * Generates and creates the ConfigMaps with per-broker configuration for Kafka brokers used in PodSets. It will
      * also delete the ConfigMaps for any scaled-down brokers (scale down is done before this is called in the
      * reconciliation)
@@ -633,17 +626,16 @@ public class KafkaReconciler {
         return configMapOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .compose(existingConfigMaps -> {
                     // This is used during Kafka rolling updates -> we have to store it for later
-                    this.logging = kafka.loggingConfiguration(kafka.getLogging(), metricsAndLogging.getLoggingCm());
+                    this.logging = kafka.logging().loggingConfiguration(reconciliation, metricsAndLogging.loggingCm());
                     this.loggingHash = Util.hashStub(Util.getLoggingDynamicallyUnmodifiableEntries(logging));
 
                     List<ConfigMap> desiredConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, listenerReconciliationResults.advertisedHostnames, listenerReconciliationResults.advertisedPorts);
-                    @SuppressWarnings({ "rawtypes" }) // Has to use Raw type because of the CompositeFuture
-                    List<Future> ops = new ArrayList<>(existingConfigMaps.size() + kafka.getReplicas());
+                    List<Future<?>> ops = new ArrayList<>();
 
                     // Delete all existing ConfigMaps which are not desired and are not the shared config map
                     List<String> desiredNames = new ArrayList<>(desiredConfigMaps.size() + 1);
-                    desiredNames.add(kafka.getAncillaryConfigMapName()); // We do not want to delete the shared ConfigMap, so we add it here
-                    desiredNames.addAll(desiredConfigMaps.stream().map(cm -> cm.getMetadata().getName()).collect(Collectors.toList()));
+                    desiredNames.add(KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name())); // We do not want to delete the shared ConfigMap, so we add it here
+                    desiredNames.addAll(desiredConfigMaps.stream().map(cm -> cm.getMetadata().getName()).toList());
 
                     for (ConfigMap cm : existingConfigMaps) {
                         // We delete the cms not on the desired names list
@@ -655,20 +647,20 @@ public class KafkaReconciler {
                     // Create / update the desired config maps
                     for (ConfigMap cm : desiredConfigMaps) {
                         String cmName = cm.getMetadata().getName();
-                        int brokerId = getPodIndexFromPodName(cmName);
+                        int nodeId = ReconcilerUtils.getPodIndexFromPodName(cmName);
 
                         // The advertised hostname and port might change. If they change, we need to roll the pods.
                         // Here we collect their hash to trigger the rolling update. For per-broker configuration,
                         // we need just the advertised hostnames / ports for given broker.
                         String brokerConfiguration = listenerReconciliationResults.advertisedHostnames
-                                .get(brokerId)
+                                .get(nodeId)
                                 .entrySet()
                                 .stream()
                                 .map(kv -> kv.getKey() + "://" + kv.getValue())
                                 .sorted()
                                 .collect(Collectors.joining(" "));
                         brokerConfiguration += listenerReconciliationResults.advertisedPorts
-                                .get(brokerId)
+                                .get(nodeId)
                                 .entrySet()
                                 .stream()
                                 .map(kv -> kv.getKey() + "://" + kv.getValue())
@@ -681,37 +673,35 @@ public class KafkaReconciler {
                         // This is captured here with the unknown configurations and the hash is used to roll the pod when it changes
                         KafkaConfiguration kc = KafkaConfiguration.unvalidated(reconciliation, cm.getData().getOrDefault(KafkaCluster.BROKER_CONFIGURATION_FILENAME, ""));
 
+                        String controllerConfiguration = "";
+                        KafkaPool pool = kafka.nodePoolForNodeId(nodeId);
+                        if (pool.isController() && !pool.isBroker())   {
+                            // For controllers only, we extract the controller-relevant configurations and use it in the configuration annotations
+                            controllerConfiguration = kc.controllerConfigsWithValues().toString();
+                        }
+
                         // We store hash of the broker configurations for later use in Pod and in rolling updates
-                        this.brokerConfigurationHash.put(brokerId, Util.hashStub(brokerConfiguration + kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString()));
+                        this.brokerConfigurationHash.put(nodeId, Util.hashStub(brokerConfiguration + kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString() + controllerConfiguration));
 
                         ops.add(configMapOperator.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
                     }
 
-                    return CompositeFuture
+                    return Future
                             .join(ops)
                             .map((Void) null);
                 });
     }
 
     /**
-     * This method is used to create or update the config maps required by the brokers. It is able to handle both
-     * shared configuration and per-broker configuration.
-     *
-     * It does not do the cleanup when switching between the modes. That is done only at the end of the
-     * reconciliation. However, when the per-broker configuration mode is used, it would delete the config maps of
-     * the scaled-down brokers since scale-down happens before this is called.
+     * This method is used to create or update the config maps required by the brokers. It does not do the cleanup the
+     * old shared Config Map used by StatefulSets. That is done only at the end of the reconciliation. However, it would
+     * delete the config maps of the scaled-down brokers since scale-down happens before this is called.
      *
      * @return  Future which completes when the Config Map(s) with configuration are created or updated
      */
     protected Future<Void> brokerConfigurationConfigMaps() {
-        return Util.metricsAndLogging(reconciliation, configMapOperator, reconciliation.namespace(), kafka.getLogging(), kafka.getMetricsConfigInCm())
-                .compose(metricsAndLoggingCm -> {
-                    if (featureGates.useStrimziPodSetsEnabled())    {
-                        return perBrokerKafkaConfiguration(metricsAndLoggingCm);
-                    } else {
-                        return sharedKafkaConfiguration(metricsAndLoggingCm);
-                    }
-                });
+        return MetricsAndLoggingUtils.metricsAndLogging(reconciliation, configMapOperator, kafka.logging(), kafka.metrics())
+                .compose(metricsAndLoggingCm -> perBrokerKafkaConfiguration(metricsAndLoggingCm));
     }
 
     /**
@@ -729,11 +719,14 @@ public class KafkaReconciler {
                             .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()),
                                     kafka.generateCertificatesSecret(clusterCa, clientsCa, listenerReconciliationResults.bootstrapDnsNames, listenerReconciliationResults.brokerDnsNames, Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())))
                             .compose(patchResult -> {
-                                if (patchResult instanceof ReconcileResult.Patched) {
-                                    // The secret is patched and some changes to the existing certificates actually occurred
-                                    existingCertsChanged = ModelUtils.doExistingCertificatesDiffer(oldSecret, patchResult.resource());
-                                } else {
-                                    existingCertsChanged = false;
+                                if (patchResult != null) {
+                                    for (NodeRef node : kafka.nodes()) {
+                                        kafkaServerCertificateHash.put(
+                                                node.nodeId(),
+                                                CertUtils.getCertificateThumbprint(patchResult.resource(),
+                                                        ClusterCa.secretEntryNameForPod(node.podName(), Ca.SecretEntry.CRT)
+                                                ));
+                                    }
                                 }
 
                                 return Future.succeededFuture();
@@ -747,24 +740,7 @@ public class KafkaReconciler {
      * @return  Completes when the JMX secret is successfully created or updated
      */
     protected Future<Void> jmxSecret() {
-        return secretOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaJmxSecretName(reconciliation.name()))
-                .compose(currentJmxSecret -> {
-                    Secret desiredJmxSecret = kafka.generateJmxSecret(currentJmxSecret);
-
-                    if (desiredJmxSecret != null)  {
-                        // Desired secret is not null => should be updated
-                        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaJmxSecretName(reconciliation.name()), desiredJmxSecret)
-                                .map((Void) null);
-                    } else if (currentJmxSecret != null)    {
-                        // Desired secret is null but current is not => we should delete the secret
-                        return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaJmxSecretName(reconciliation.name()), null)
-                                .map((Void) null);
-                    } else {
-                        // Both current and desired secret are null => nothing to do
-                        return Future.succeededFuture();
-                    }
-
-                });
+        return ReconcilerUtils.reconcileJmxSecret(reconciliation, secretOperator, kafka);
     }
 
     /**
@@ -773,323 +749,106 @@ public class KafkaReconciler {
      * @return  Completes when the PDB was successfully created or updated
      */
     protected Future<Void> podDisruptionBudget() {
-        if (!pfa.hasPodDisruptionBudgetV1()) {
-            return Future.succeededFuture();
-        } else {
-            PodDisruptionBudget pdb;
-
-            if (featureGates.useStrimziPodSetsEnabled()) {
-                pdb = kafka.generateCustomControllerPodDisruptionBudget();
-            } else {
-                pdb = kafka.generatePodDisruptionBudget();
-            }
-
-            return podDisruptionBudgetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), pdb)
+        return podDisruptionBudgetOperator
+                    .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), kafka.generatePodDisruptionBudget())
                     .map((Void) null);
-        }
     }
 
     /**
-     * Manages the PodDisruptionBudgets on Kubernetes clusters which support only v1beta1 version of PDBs
+     * Prepares annotations for Kafka pods within a StrimziPodSet which are known only in the KafkaAssemblyOperator level.
+     * These are later passed to KafkaCluster where there are used when creating the Pod definitions.
      *
-     * @return  Completes when the PDB was successfully created or updated
-     */
-    protected Future<Void> podDisruptionBudgetV1Beta1() {
-        if (pfa.hasPodDisruptionBudgetV1()) {
-            return Future.succeededFuture();
-        } else {
-            io.fabric8.kubernetes.api.model.policy.v1beta1.PodDisruptionBudget pdb;
-
-            if (featureGates.useStrimziPodSetsEnabled()) {
-                pdb = kafka.generateCustomControllerPodDisruptionBudgetV1Beta1();
-            } else {
-                pdb = kafka.generatePodDisruptionBudgetV1Beta1();
-            }
-
-            return podDisruptionBudgetV1Beta1Operator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), pdb)
-                    .map((Void) null);
-        }
-    }
-
-    /**
-     * Prepares annotations for Kafka pods which are known only in the KafkaAssemblyOperator level. These are later
-     * passed to KafkaCluster where there are used when creating the Pod definitions.
+     * @param nodeId    ID of the broker, the annotations of which are being prepared.
      *
      * @return  Map with Pod annotations
      */
-    private Map<String, String> kafkaPodAnnotations(int brokerId, boolean storageAnnotation)    {
+    private Map<String, String> podSetPodAnnotations(int nodeId) {
         Map<String, String> podAnnotations = new LinkedHashMap<>(9);
         podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, String.valueOf(ModelUtils.caCertGeneration(this.clusterCa)));
+        podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, String.valueOf(ModelUtils.caKeyGeneration(this.clusterCa)));
         podAnnotations.put(Ca.ANNO_STRIMZI_IO_CLIENTS_CA_CERT_GENERATION, String.valueOf(ModelUtils.caCertGeneration(this.clientsCa)));
         podAnnotations.put(Annotations.ANNO_STRIMZI_LOGGING_APPENDERS_HASH, loggingHash);
-        podAnnotations.put(KafkaCluster.ANNO_STRIMZI_BROKER_CONFIGURATION_HASH, brokerConfigurationHash.get(brokerId));
+        podAnnotations.put(KafkaCluster.ANNO_STRIMZI_BROKER_CONFIGURATION_HASH, brokerConfigurationHash.get(nodeId));
         podAnnotations.put(ANNO_STRIMZI_IO_KAFKA_VERSION, kafka.getKafkaVersion().version());
-        podAnnotations.put(KafkaCluster.ANNO_STRIMZI_IO_LOG_MESSAGE_FORMAT_VERSION, kafka.getLogMessageFormatVersion());
-        podAnnotations.put(KafkaCluster.ANNO_STRIMZI_IO_INTER_BROKER_PROTOCOL_VERSION, kafka.getInterBrokerProtocolVersion());
+
+        String logMessageFormatVersion = kafka.getLogMessageFormatVersion();
+        if (logMessageFormatVersion != null && !logMessageFormatVersion.isBlank()) {
+            podAnnotations.put(KafkaCluster.ANNO_STRIMZI_IO_LOG_MESSAGE_FORMAT_VERSION, logMessageFormatVersion);
+        }
+
+        String interBrokerProtocolVersion = kafka.getInterBrokerProtocolVersion();
+        if (interBrokerProtocolVersion != null && !interBrokerProtocolVersion.isBlank()) {
+            podAnnotations.put(KafkaCluster.ANNO_STRIMZI_IO_INTER_BROKER_PROTOCOL_VERSION, interBrokerProtocolVersion);
+        }
+
+        podAnnotations.put(ANNO_STRIMZI_SERVER_CERT_HASH, kafkaServerCertificateHash.get(nodeId)); // Annotation of broker certificate hash
 
         // Annotations with custom cert thumbprints to help with rolling updates when they change
         if (!listenerReconciliationResults.customListenerCertificateThumbprints.isEmpty()) {
             podAnnotations.put(KafkaCluster.ANNO_STRIMZI_CUSTOM_LISTENER_CERT_THUMBPRINTS, listenerReconciliationResults.customListenerCertificateThumbprints.toString());
         }
 
-        // Storage annotation on Pods is used only for StatefulSets
-        if (storageAnnotation) {
-            podAnnotations.put(ANNO_STRIMZI_IO_STORAGE, ModelUtils.encodeStorageToJson(kafka.getStorage()));
-        }
-
         return podAnnotations;
     }
 
     /**
-     * Create or update the StatefulSet for the Kafka cluster. When StatefulSets are disabled, it will try to delete
-     * the old StatefulSet.
+     * Helps with the migration from StatefulSets to StrimziPodSets when the cluster is switching between them. When the
+     * switch happens, it deletes the old StatefulSet. It should happen before the new PodSet is created to
+     * allow the controller hand-off.
      *
-     * @return  Future which completes when the StatefulSet is created, updated or deleted
+     * @return          Future which completes when the StatefulSet is deleted or does not need to be deleted
      */
-    protected Future<Void> statefulSet() {
-        if (!featureGates.useStrimziPodSetsEnabled()) {
-            // StatefulSets are enabled => make sure the StatefulSet exists with the right settings
-            StatefulSet kafkaSts = kafka.generateStatefulSet(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, kafkaPodAnnotations(sharedConfigurationId, true));
-            return stsOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), kafkaSts)
-                    .compose(rr -> {
-                        statefulSetDiff = rr;
+    protected Future<Void> migrateFromStatefulSetToPodSet() {
+        // Deletes the StatefulSet if it exists as a part of migration to PodSets
+        return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
+                .compose(sts -> {
+                    if (sts != null)    {
+                        return stsOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), false);
+                    } else {
                         return Future.succeededFuture();
-                    });
-        } else {
-            // StatefulSets are disabled => delete the StatefulSet if it exists
-            return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                    .compose(sts -> {
-                        if (sts != null)    {
-                            return stsOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), false);
-                        } else {
-                            return Future.succeededFuture();
-                        }
-                    });
-        }
-    }
-
-    /**
-     * Create or update the StrimziPodSet for the Kafka cluster. When PodSets are disabled, it will try to delete the
-     * old PodSet. If set, it uses the old replica count since scaling-up happens only later in a separate step.
-     *
-     * @return  Future which completes when the PodSet is created, updated or deleted
-     */
-    protected Future<Void> podSet() {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            // PodSets are enabled => create/update the StrimziPodSet for Kafka
-            int replicas;
-
-            if (currentReplicas != 0
-                    && currentReplicas < kafka.getReplicas())  {
-                // If there is previous replica count & it is smaller than the desired replica count, we use the
-                // previous one because the scale-up will happen only later during the reconciliation
-                replicas = currentReplicas;
-            } else {
-                // If there is no previous number of replicas (because the PodSet did not exist) or if the
-                // previous replicas are bigger than desired replicas we use desired replicas (scale-down already
-                // happened)
-                replicas = kafka.getReplicas();
-            }
-
-            StrimziPodSet kafkaPodSet = kafka.generatePodSet(replicas, pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, brokerId -> kafkaPodAnnotations(brokerId, false));
-            return strimziPodSetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), kafkaPodSet)
-                    .compose(rr -> {
-                        podSetDiff = rr;
-                        return Future.succeededFuture();
-                    });
-        } else {
-            // PodSets are disabled => delete the StrimziPodSet for Kafka
-            return strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                    .compose(podSet -> {
-                        if (podSet != null)    {
-                            return strimziPodSetOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), false);
-                        } else {
-                            return Future.succeededFuture();
-                        }
-                    });
-        }
-    }
-
-    /**
-     * Checks if any Kafka broker needs rolling update to add or remove JBOD volumes. If it does, we trigger a
-     * sequential rolling update because the pods need to be rolled in sequence to add or remove volumes.
-     *
-     * @return  Future which completes when all added or removed JBOD volumes are handled
-     */
-    protected Future<Void> rollToAddOrRemoveVolumes() {
-        Storage storage = kafka.getStorage();
-
-        // We do the special rolling update only when:
-        //   * JBOD storage is actually used as storage
-        //   * and StatefulSets are used
-        // StrimziPodSets do not need special rolling update, they can add / remove volumes during regular rolling updates
-        if (storage instanceof JbodStorage
-                && !featureGates.useStrimziPodSetsEnabled()) {
-            JbodStorage jbodStorage = (JbodStorage) storage;
-            return kafkaRollToAddOrRemoveVolumesInStatefulSet(jbodStorage);
-        } else {
-            return Future.succeededFuture();
-        }
-    }
-
-    /**
-     * Checks whether the particular pod needs restart because of added or removed JBOD volumes. This method returns
-     * a list instead of boolean so that it can be used directly in the rolling update procedure and log proper
-     * reasons for the restart.
-     *
-     * @param pod               Broker pod which should be considered for restart
-     * @param desiredStorage    Desired storage configuration
-     * @param currentReplicas   Number of Kafka replicas before this reconciliation
-     * @param desiredReplicas   Number of desired Kafka replicas
-     *
-     * @return  Empty list when no restart is needed. List containing the restart reason if the restart is needed.
-     */
-    private RestartReasons needsRestartBecauseAddedOrRemovedJbodVolumes(Pod pod, JbodStorage desiredStorage, int currentReplicas, int desiredReplicas)  {
-        if (pod != null
-                && pod.getMetadata() != null) {
-            String jsonStorage = Annotations.stringAnnotation(pod, ANNO_STRIMZI_IO_STORAGE, null);
-
-            if (jsonStorage != null) {
-                Storage currentStorage = ModelUtils.decodeStorageFromJson(jsonStorage);
-
-                if (new StorageDiff(reconciliation, currentStorage, desiredStorage, currentReplicas, desiredReplicas).isVolumesAddedOrRemoved())    {
-                    return RestartReasons.of(RestartReason.JBOD_VOLUMES_CHANGED);
-                }
-            }
-        }
-
-        return RestartReasons.empty();
-    }
-
-    /**
-     * Normally, the rolling update of Kafka brokers is done in the sequence best for Kafka (controller is rolled
-     * last etc.). This method does a rolling update of Kafka brokers in sequence based on the pod index number.
-     * This is needed in some special situation such as storage configuration changes.
-     *
-     * This method is using the regular rolling update mechanism. In order to achieve the sequential rolling
-     * update it calls it recursively with only subset of the pods being considered for rolling update. Thanks to
-     * this, it achieves the right order regardless who is controller but still makes sure that the replicas are
-     * in-sync.
-     *
-     * This is used only for StatefulSets rolling. PodSets do not need it.
-     *
-     * @param sts               StatefulSet which should be rolled
-     * @param podNeedsRestart   Function to tell the rolling restart mechanism if given broker pod needs restart or not
-     * @param nextPod           The sequence number of the next pod which should be considered for rolling
-     * @param lastPod           Index of the last pod which should be considered for restart
-     *
-     * @return  Future which completes when the rolling update of all brokers in sequence is complete
-     */
-    protected Future<Void> maybeRollKafkaInSequence(StatefulSet sts, Function<Pod, RestartReasons> podNeedsRestart, int nextPod, int lastPod) {
-        if (nextPod <= lastPod)  {
-            final int podToRoll = nextPod;
-
-            return maybeRollKafka(sts.getSpec().getReplicas(), pod -> {
-                if (pod != null && pod.getMetadata().getName().endsWith("-" + podToRoll))    {
-                    return podNeedsRestart.apply(pod);
-                } else {
-                    return RestartReasons.empty();
-                }
-            }, Map.of(), Map.of(), false)
-                    .compose(ignore -> maybeRollKafkaInSequence(sts, podNeedsRestart, nextPod + 1, lastPod));
-        } else {
-            // All pods checked for sequential RU => nothing more to do
-            return Future.succeededFuture();
-        }
-    }
-
-    /**
-     * Checks if any Kafka broker needs rolling update to add or remove JBOD volumes. If it does, we trigger a
-     * sequential rolling update because the pods need to be rolled in sequence to add or remove volumes.
-     *
-     * This method is used only for StatefulSets which require special rolling process.
-     *
-     * @param jbodStorage   Desired storage configuration
-     *
-     * @return              Future indicating the completion and result of the rolling update
-     */
-    protected Future<Void> kafkaRollToAddOrRemoveVolumesInStatefulSet(JbodStorage jbodStorage) {
-        // We first check if any broker actually needs the rolling update. Only if at least one of them needs it,
-        // we trigger it. This check helps to not go through the rolling update if not needed.
-        return podOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
-                .compose(pods -> {
-                    for (Pod pod : pods) {
-                        if (needsRestartBecauseAddedOrRemovedJbodVolumes(pod, jbodStorage, currentReplicas, kafka.getReplicas()).shouldRestart())   {
-                            // At least one broker needs rolling update => we can trigger it without checking the other brokers
-                            LOGGER.debugCr(reconciliation, "Kafka brokers needs rolling update to add or remove JBOD volumes");
-
-                            return stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()))
-                                    .compose(sts -> {
-                                        if (sts != null) {
-                                            int lastPodIndex = Math.min(currentReplicas, kafka.getReplicas()) - 1;
-                                            return maybeRollKafkaInSequence(sts, podToCheck -> needsRestartBecauseAddedOrRemovedJbodVolumes(podToCheck, jbodStorage, currentReplicas, kafka.getReplicas()), 0, lastPodIndex);
-                                        } else {
-                                            // STS does not exist => nothing to roll
-                                            return Future.succeededFuture();
-                                        }
-                                    });
-                        }
                     }
-
-                    LOGGER.debugCr(reconciliation, "No rolling update of Kafka brokers due to added or removed JBOD volumes is needed");
-                    return Future.succeededFuture();
                 });
     }
 
     /**
-     * Roles the Kafka brokers (if needed). This method handles the whether StatefulSets or PodSets are being used and
-     * calls other methods to execute the rolling update if needed.
+     * Create or update the StrimziPodSet for the Kafka cluster. If set, it uses the old replica count since scaling-up
+     * happens only later in a separate step.
      *
-     * @return  Future which completes when any of the Kafka pods which need rolling is rolled
+     * @return  Future which completes when the PodSet is created, updated or deleted
      */
-    protected Future<Void> rollingUpdate() {
-        if (featureGates.useStrimziPodSetsEnabled())   {
-            return maybeRollKafka(
-                    podSetDiff.resource().getSpec().getPods().size(),
-                    pod -> ReconcilerUtils.reasonsToRestartPod(reconciliation, podSetDiff.resource(), pod, fsResizingRestartRequest, existingCertsChanged, clusterCa, clientsCa),
-                    listenerReconciliationResults.advertisedHostnames,
-                    listenerReconciliationResults.advertisedPorts,
-                    true
-            );
-        } else {
-            return maybeRollKafka(
-                    statefulSetDiff.resource().getSpec().getReplicas(),
-                    pod -> ReconcilerUtils.reasonsToRestartPod(reconciliation, statefulSetDiff.resource(), pod, fsResizingRestartRequest, existingCertsChanged, clusterCa, clientsCa),
-                    listenerReconciliationResults.advertisedHostnames,
-                    listenerReconciliationResults.advertisedPorts,
-                    true
-            );
-        }
+    protected Future<Map<String, ReconcileResult<StrimziPodSet>>> podSet() {
+        return strimziPodSetOperator
+                .batchReconcile(
+                        reconciliation,
+                        reconciliation.namespace(),
+                        kafka.generatePodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations),
+                        kafka.getSelectorLabels()
+                );
     }
 
     /**
-     * Scales-up the Kafka cluster if needed. When scaling uo the Kafka cluster, all new brokers are created in one go.
-     * This method does not wait for the readiness of the new pods, it just scales the controller resource.
+     * Roles the Kafka brokers (if needed).
      *
-     * @return  Future which completes when the StrimziPodSet or StatefulSet were scaled up
+     * @param podSetDiffs   Map with the PodSet reconciliation results
+     *
+     * @return  Future which completes when any of the Kafka pods which need rolling is rolled
      */
-    protected Future<Void> scaleUp() {
-        if (currentReplicas != 0
-                && currentReplicas < kafka.getReplicas()) {
-            // The previous number of replicas is known and is smaller than desired number of replicas
-            //   => we need to do scale-up
-            LOGGER.infoCr(reconciliation, "Scaling Kafka up from {} to {} replicas", currentReplicas, kafka.getReplicas());
-
-            if (featureGates.useStrimziPodSetsEnabled())   {
-                StrimziPodSet kafkaPodSet = kafka.generatePodSet(kafka.getReplicas(), pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, brokerId -> kafkaPodAnnotations(brokerId, false));
-                return strimziPodSetOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), kafkaPodSet)
-                        .map((Void) null);
-            } else {
-                return stsOperator.scaleUp(reconciliation, reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()), kafka.getReplicas())
-                        .map((Void) null);
-            }
-        } else {
-            // Previous number of replicas is not known (because the PodSet os StatefulSet  did not exist) or is
-            // bigger than desired replicas => nothing to do
-            // (if the previous replica count was not known, the desired count was already used when patching
-            // the pod set, so no need to do it again)
-            return Future.succeededFuture();
-        }
+    protected Future<Void> rollingUpdate(Map<String, ReconcileResult<StrimziPodSet>> podSetDiffs) {
+        return maybeRollKafka(
+                kafka.nodes(),
+                pod -> ReconcilerUtils.reasonsToRestartPod(
+                        reconciliation,
+                        podSetDiffs.get(ReconcilerUtils.getControllerNameFromPodName(pod.getMetadata().getName())).resource(),
+                        pod,
+                        fsResizingRestartRequest,
+                        ReconcilerUtils.trackedServerCertChanged(pod, kafkaServerCertificateHash),
+                        clusterCa,
+                        clientsCa
+                ),
+                listenerReconciliationResults.advertisedHostnames,
+                listenerReconciliationResults.advertisedPorts,
+                true
+        );
     }
 
     /**
@@ -1103,10 +862,7 @@ public class KafkaReconciler {
                         reconciliation,
                         podOperator,
                         operationTimeoutMs,
-                        IntStream
-                                .range(0, kafka.getReplicas())
-                                .mapToObj(i -> KafkaResources.kafkaPodName(reconciliation.name(), i))
-                                .collect(Collectors.toList())
+                        kafka.nodes().stream().map(node -> node.podName()).toList()
                 );
     }
 
@@ -1116,7 +872,7 @@ public class KafkaReconciler {
      * @return  Future which completes when the endpoints are ready
      */
     protected Future<Void> serviceEndpointsReady() {
-        return serviceOperator.endpointReadiness(reconciliation, reconciliation.namespace(), kafka.getServiceName(), 1_000, operationTimeoutMs);
+        return serviceOperator.endpointReadiness(reconciliation, reconciliation.namespace(), KafkaResources.bootstrapServiceName(reconciliation.name()), 1_000, operationTimeoutMs);
     }
 
     /**
@@ -1125,7 +881,7 @@ public class KafkaReconciler {
      * @return  Future which completes when the endpoints are ready
      */
     protected Future<Void> headlessServiceEndpointsReady() {
-        return serviceOperator.endpointReadiness(reconciliation, reconciliation.namespace(), kafka.getHeadlessServiceName(), 1_000, operationTimeoutMs);
+        return serviceOperator.endpointReadiness(reconciliation, reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), 1_000, operationTimeoutMs);
     }
 
     /**
@@ -1172,7 +928,7 @@ public class KafkaReconciler {
      * this would not help after scale-downs. Therefore, we check if there are any PVCs which should not be present
      * and delete them when they are.
      *
-     * This should be called only after the StatefulSet reconciliation, rolling update and scale-down when the PVCs
+     * This should be called only after the StrimziPodSet reconciliation, rolling update and scale-down when the PVCs
      * are not used any more by the pods.
      *
      * @return  Future which completes when the PVCs which should be deleted are deleted
@@ -1181,7 +937,7 @@ public class KafkaReconciler {
         return pvcOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .compose(pvcs -> {
                     List<String> maybeDeletePvcs = pvcs.stream().map(pvc -> pvc.getMetadata().getName()).collect(Collectors.toList());
-                    List<String> desiredPvcs = kafka.generatePersistentVolumeClaims(kafka.getStorage()).stream().map(pvc -> pvc.getMetadata().getName()).collect(Collectors.toList());
+                    List<String> desiredPvcs = kafka.generatePersistentVolumeClaims().stream().map(pvc -> pvc.getMetadata().getName()).collect(Collectors.toList());
 
                     return new PvcReconciler(reconciliation, pvcOperator, storageClassOperator)
                             .deletePersistentClaims(maybeDeletePvcs, desiredPvcs);
@@ -1189,55 +945,16 @@ public class KafkaReconciler {
     }
 
     /**
-     * Deletes the ConfigMap with shared Kafka configuration. This needs to be done when switching to per-broker
-     * configuration / PodSets.
+     * Deletes the ConfigMap with shared Kafka configuration. This needs to be done after migrating from StatefulSets to StrimziPodSets
      *
      * @return  Future which returns when the shared configuration config map is deleted
      */
     protected Future<Void> sharedKafkaConfigurationCleanup() {
-        return configMapOperator.deleteAsync(reconciliation, reconciliation.namespace(), KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()), true);
-    }
-
-    /**
-     * Deletes all ConfigMaps with per-broker Kafka configuration. This needs to be done when switching to the
-     * shared configuration / StatefulSets
-     *
-     * @return  Future which completes when all the unnecessary per-broker config maps are deleted
-     */
-    protected Future<Void> perBrokerKafkaConfigurationCleanup() {
-        return configMapOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
-                .compose(existingConfigMaps -> {
-                    @SuppressWarnings({ "rawtypes" }) // Has to use Raw type because of the CompositeFuture
-                    List<Future> ops = new ArrayList<>(existingConfigMaps.size()); // We will need at most the deletion of existing configmaps + update of new one => hence the + 1
-
-                    // Delete all existing apart from the shared one
-                    for (ConfigMap cm : existingConfigMaps) {
-                        // We delete the cm if it is not getAncillaryConfigMapName
-                        if (!KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()).equals(cm.getMetadata().getName())) {
-                            ops.add(configMapOperator.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
-                        }
-                    }
-
-                    return CompositeFuture
-                            .join(ops)
-                            .map((Void) null);
-                });
-    }
-
-    /**
-     * This method is used to clean up the configuration Config Maps. This might be needed when switching between
-     * StatefulSets / shared configuration and PodSets / per-broker configuration. This is done in a separate step
-     * at the end of the reconciliation to avoid problems if the reconciliation fails (the deleted config map would
-     * not allow pods to be restarted etc.)
-     *
-     * @return  Future which completes when all the unnecessary configuration config maps are deleted
-     */
-    protected Future<Void> brokerConfigurationConfigMapsCleanup() {
-        if (featureGates.useStrimziPodSetsEnabled())    {
-            return sharedKafkaConfigurationCleanup();
-        } else {
-            return perBrokerKafkaConfigurationCleanup();
-        }
+        // We use reconcile() instead of deleteAsync() because reconcile first checks if the deletion is needed.
+        // Deleting resource which likely does not exist would cause more load on the Kubernetes API then trying to get
+        // it first because of the watch if it was deleted etc.
+        return configMapOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()), null)
+                .map((Void) null);
     }
 
     /**
@@ -1257,11 +974,11 @@ public class KafkaReconciler {
                         return podOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels());
                     })
                     .map(pods -> {
-                        Map<Integer, Node> brokerNodes = new HashMap<>(kafka.getReplicas());
+                        Map<Integer, Node> brokerNodes = new HashMap<>();
 
                         for (Pod broker : pods) {
                             String podName = broker.getMetadata().getName();
-                            Integer podIndex = getPodIndexFromPodName(podName);
+                            Integer podIndex = ReconcilerUtils.getPodIndexFromPodName(podName);
 
                             if (broker.getStatus() != null && broker.getStatus().getHostIP() != null) {
                                 String hostIP = broker.getStatus().getHostIP();
@@ -1322,14 +1039,94 @@ public class KafkaReconciler {
         return Future.succeededFuture();
     }
 
+    // Adds Kafka version to the Kafka Status instance
+    protected Future<Void> updateKafkaVersion(KafkaStatus kafkaStatus) {
+        kafkaStatus.setKafkaVersion(kafka.getKafkaVersion().version());
+        return Future.succeededFuture();
+    }
+
     /**
-     * This is used to get the Kafka Storage configuration actually used by the Kafka brokers. The storage configuration
-     * is needed by Cruise Control, but due to the possibility of illegal storage changes which will be reverted it
-     * cannot be taken from the Kafka custom resource directly.
+     * Updates the statuses of the used KafkaNodePools with the used node IDs. Also prepares the list of used node pools
+     * for the Kafka CR status (but the Kafka status is not updated in this method).
      *
-     * @return  The storage configuration used by the Kafka brokers
+     * @param kafkaStatus   The status of the Kafka CR to add the list of node pools belonging to it
+     *
+     * @return  Future which completes when the statuses are set
      */
-    public Storage kafkaStorage()   {
-        return kafka.getStorage();
+    protected Future<Void> updateNodePoolStatuses(KafkaStatus kafkaStatus) {
+        if (isKafkaNodePoolsEnabled) {
+            List<KafkaNodePool> updatedNodePools = new ArrayList<>();
+            List<UsedNodePoolStatus> statusesForKafka = new ArrayList<>();
+            Map<String, KafkaNodePoolStatus> statuses = kafka.nodePoolStatuses();
+
+            for (KafkaNodePool nodePool : kafkaNodePoolCrs) {
+                statusesForKafka.add(new UsedNodePoolStatusBuilder().withName(nodePool.getMetadata().getName()).build());
+
+                KafkaNodePool updatedNodePool = new KafkaNodePoolBuilder(nodePool)
+                        .withStatus(
+                                new KafkaNodePoolStatusBuilder(statuses.get(nodePool.getMetadata().getName()))
+                                        .withObservedGeneration(nodePool.getMetadata().getGeneration())
+                                        .build())
+                        .build();
+
+                StatusDiff diff = new StatusDiff(nodePool.getStatus(), updatedNodePool.getStatus());
+
+                if (!diff.isEmpty()) {
+                    // Status changed => we will update it
+                    updatedNodePools.add(updatedNodePool);
+                }
+            }
+
+            // Sets the list of used Node Pools in the Kafka CR status
+            kafkaStatus.setKafkaNodePools(statusesForKafka.stream().sorted(Comparator.comparing(UsedNodePoolStatus::getName)).toList());
+
+            List<Future<KafkaNodePool>> statusUpdateFutures = new ArrayList<>();
+
+            for (KafkaNodePool updatedNodePool : updatedNodePools) {
+                statusUpdateFutures.add(kafkaNodePoolOperator.updateStatusAsync(reconciliation, updatedNodePool));
+            }
+
+            // Return future
+            return Future.join(statusUpdateFutures)
+                    .map((Void) null);
+        } else {
+            return Future.succeededFuture();
+        }
+    }
+
+    /**
+     * This is used to get the Storage configuration used by the Kafka nodes. The storage configuration is needed by
+     * Cruise Control. But collecting it directly in Cruise Control from the custom resources would be complicated as
+     * it would need to figure out the node pools and the node IDs belonging to them. In addition, the storage
+     * configuration might change (in case of un-allowed changes), but due to the possibility of illegal storage changes
+     * which will be reverted it in the Kafka and Node Pool models.
+     *
+     * @return  Map with the pool names as the keys and storage configuration for given pools as the values
+     */
+    public Map<String, Storage> kafkaStorage()   {
+        return kafka.getStorageByPoolName();
+    }
+
+    /**
+     * This is used to get the resource configuration used by the Kafka brokers. The resource configuration is needed by
+     * Cruise Control. But collecting it directly in Cruise Control from the custom resources would be complicated as
+     * it would need to figure out the node pools and the node IDs belonging to them. This includes only the broker
+     * nodes. Controller nodes are not included in this map.
+     *
+     * @return  Map with the pool names as the keys and resource requirements for given pools as the values
+     */
+    public Map<String, ResourceRequirements> kafkaBrokerResourceRequirements()   {
+        return kafka.getBrokerResourceRequirementsByPoolName();
+    }
+
+    /**
+     * This returns the list of Kafka brokers which will be later used for Cruise Control configuration so that Cruise
+     * Control does not need to collect it itself from the different custom resources. This includes only the broker
+     * nodes. Controller nodes are not included in this set.
+     *
+     * @return  Set with node references for the Kafka nodes
+     */
+    public Set<NodeRef> kafkaBrokerNodes()   {
+        return kafka.brokerNodes();
     }
 }

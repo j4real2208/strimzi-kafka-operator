@@ -12,19 +12,17 @@ import io.fabric8.kubernetes.client.dsl.Resource;
 import io.strimzi.api.kafka.model.Spec;
 import io.strimzi.api.kafka.model.status.Status;
 import io.strimzi.certs.CertManager;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.model.ImagePullPolicy;
 import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.common.AbstractOperator;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
-import io.strimzi.operator.common.operator.resource.AbstractWatchableStatusedResourceOperator;
+import io.strimzi.operator.common.operator.resource.AbstractWatchableStatusedNamespacedResourceOperator;
 import io.strimzi.operator.common.operator.resource.ClusterRoleBindingOperator;
 import io.strimzi.operator.common.operator.resource.ConfigMapOperator;
 import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetOperator;
-import io.strimzi.operator.common.operator.resource.PodDisruptionBudgetV1Beta1Operator;
 import io.strimzi.operator.common.operator.resource.SecretOperator;
 import io.strimzi.operator.common.operator.resource.ServiceAccountOperator;
 import io.strimzi.operator.common.operator.resource.ServiceOperator;
@@ -44,13 +42,12 @@ import java.util.List;
  */
 public abstract class AbstractAssemblyOperator<C extends KubernetesClient, T extends CustomResource<P, S>,
         L extends KubernetesResourceList<T>, R extends Resource<T>, P extends Spec, S extends Status>
-    extends AbstractOperator<T, P, S, AbstractWatchableStatusedResourceOperator<C, T, L, R>> {
+    extends AbstractOperator<T, P, S, AbstractWatchableStatusedNamespacedResourceOperator<C, T, L, R>> {
     protected final PlatformFeaturesAvailability pfa;
     protected final SecretOperator secretOperations;
     protected final CertManager certManager;
     protected final PasswordGenerator passwordGenerator;
     protected final PodDisruptionBudgetOperator podDisruptionBudgetOperator;
-    protected final PodDisruptionBudgetV1Beta1Operator podDisruptionBudgetV1Beta1Operator;
     protected final ServiceOperator serviceOperations;
     protected final ConfigMapOperator configMapOperations;
     protected final ClusterRoleBindingOperator clusterRoleBindingOperations;
@@ -72,7 +69,7 @@ public abstract class AbstractAssemblyOperator<C extends KubernetesClient, T ext
      */
     protected AbstractAssemblyOperator(Vertx vertx, PlatformFeaturesAvailability pfa, String kind,
                                        CertManager certManager, PasswordGenerator passwordGenerator,
-                                       AbstractWatchableStatusedResourceOperator<C, T, L, R> resourceOperator,
+                                       AbstractWatchableStatusedNamespacedResourceOperator<C, T, L, R> resourceOperator,
                                        ResourceOperatorSupplier supplier,
                                        ClusterOperatorConfig config) {
         super(vertx, kind, resourceOperator, supplier.metricsProvider, config.getCustomResourceSelector());
@@ -81,7 +78,6 @@ public abstract class AbstractAssemblyOperator<C extends KubernetesClient, T ext
         this.passwordGenerator = passwordGenerator;
         this.secretOperations = supplier.secretOperations;
         this.podDisruptionBudgetOperator = supplier.podDisruptionBudgetOperator;
-        this.podDisruptionBudgetV1Beta1Operator = supplier.podDisruptionBudgetV1Beta1Operator;
         this.configMapOperations = supplier.configMapOperations;
         this.serviceOperations = supplier.serviceOperations;
         this.clusterRoleBindingOperations = supplier.clusterRoleBindingOperator;

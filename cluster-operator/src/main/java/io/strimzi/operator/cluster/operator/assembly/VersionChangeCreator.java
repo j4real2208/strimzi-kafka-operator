@@ -10,8 +10,7 @@ import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaResources;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
-import io.strimzi.operator.cluster.FeatureGates;
-import io.strimzi.operator.cluster.KafkaUpgradeException;
+import io.strimzi.operator.cluster.model.KafkaUpgradeException;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaConfiguration;
 import io.strimzi.operator.cluster.model.KafkaVersion;
@@ -24,7 +23,6 @@ import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.resource.PodOperator;
-import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 
 import java.util.List;
@@ -41,7 +39,6 @@ public class VersionChangeCreator {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(VersionChangeCreator.class.getName());
 
     private final Reconciliation reconciliation;
-    private final FeatureGates featureGates;
     private final KafkaVersion.Lookup versions;
 
     private final StatefulSetOperator stsOperator;
@@ -91,7 +88,6 @@ public class VersionChangeCreator {
 
         // Store operators and Feature Gates configuration
         this.versions = config.versions();
-        this.featureGates = config.featureGates();
         this.stsOperator = supplier.stsOperations;
         this.strimziPodSetOperator = supplier.strimziPodSetOperator;
         this.podOperator = supplier.podOperations;
@@ -120,27 +116,22 @@ public class VersionChangeCreator {
         Future<StatefulSet> stsFuture = stsOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()));
         Future<StrimziPodSet> podSetFuture = strimziPodSetOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaStatefulSetName(reconciliation.name()));
 
-        return CompositeFuture.join(stsFuture, podSetFuture)
+        return Future.join(stsFuture, podSetFuture)
                 .compose(res -> {
                     StatefulSet sts = res.resultAt(0);
                     StrimziPodSet podSet = res.resultAt(1);
 
                     if (sts != null && podSet != null)  {
-                        // Both StatefulSet and PodSet exist => we create the description based on the feature gate
-                        if (featureGates.useStrimziPodSetsEnabled())    {
-                            versionFromControllerResource = Annotations.annotations(podSet).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
-                        } else {
-                            versionFromControllerResource = Annotations.annotations(sts).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
-                        }
-
+                        // Both StatefulSet and PodSet exist => we use StrimziPodSet as the main controller resource
+                        versionFromControllerResource = Annotations.annotations(podSet).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
+                        freshDeployment = false;
+                    } else if (podSet != null) {
+                        // PodSet exists, StatefulSet does not => we create the description from the PodSet
+                        versionFromControllerResource = Annotations.annotations(podSet).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
                         freshDeployment = false;
                     } else if (sts != null) {
                         // StatefulSet exists, PodSet does nto exist => we create the description from the StatefulSet
                         versionFromControllerResource = Annotations.annotations(sts).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
-                        freshDeployment = false;
-                    } else if (podSet != null) {
-                        //PodSet exists, StatefulSet does not => we create the description from the PodSet
-                        versionFromControllerResource = Annotations.annotations(podSet).get(ANNO_STRIMZI_IO_KAFKA_VERSION);
                         freshDeployment = false;
                     }
 
@@ -228,8 +219,8 @@ public class VersionChangeCreator {
                 // Either Pods or StatefulSet already exist. However, none of them contains the version
                 // annotation. This suggests they are not created by the current versions of Strimzi.
                 // Without the annotation, we cannot detect the Kafka version and decide on upgrade.
-                LOGGER.warnCr(reconciliation, "Kafka Pods or StatefulSet exist, but do not contain the {} annotation to detect their version. Kafka upgrade cannot be detected.", ANNO_STRIMZI_IO_KAFKA_VERSION);
-                throw new KafkaUpgradeException("Kafka Pods or StatefulSet exist, but do not contain the " + ANNO_STRIMZI_IO_KAFKA_VERSION + " annotation to detect their version. Kafka upgrade cannot be detected.");
+                LOGGER.warnCr(reconciliation, "Kafka Pods or StrimziPodSet exist, but do not contain the {} annotation to detect their version. Kafka upgrade cannot be detected.", ANNO_STRIMZI_IO_KAFKA_VERSION);
+                throw new KafkaUpgradeException("Kafka Pods or StrimziPodSet exist, but do not contain the " + ANNO_STRIMZI_IO_KAFKA_VERSION + " annotation to detect their version. Kafka upgrade cannot be detected.");
             }
         } else if (lowestKafkaVersion.equals(highestKafkaVersion)) {
             // All brokers have the same version. We can use it as the current version.
@@ -281,12 +272,20 @@ public class VersionChangeCreator {
             }
 
             if (logMessageFormatVersionFromCr == null) {
-                // When log.message.format.version is not set, we set it to current Kafka version
-                logMessageFormatVersion = versionFromCr.messageVersion();
-
-                if (highestLogMessageFormatVersionFromPods != null &&
-                        !versionFromCr.messageVersion().equals(highestLogMessageFormatVersionFromPods)) {
-                    LOGGER.infoCr(reconciliation, "Upgrading Kafka log.message.format.version from {} to {}", highestLogMessageFormatVersionFromPods, versionFromCr.messageVersion());
+                if (interBrokerProtocolVersionFromCr != null
+                        && compareDottedIVVersions(interBrokerProtocolVersionFromCr, "3.0") >= 0) {
+                    // When inter.broker.protocol.version is set to 3.0 or higher, the log.message.format.version is
+                    // ignored. To avoid unnecessary rolling updates just because changing log.message.format.version,
+                    // when the user does not explicitly set it but sets inter.broker.protocol.version, we mirror
+                    // inter.broker.protocol.version for the log.message.format.version as well.
+                    logMessageFormatVersion = interBrokerProtocolVersionFromCr;
+                } else {
+                    // When log.message.format.version is not set, we set it to current Kafka version
+                    logMessageFormatVersion = versionFromCr.messageVersion();
+                    if (highestLogMessageFormatVersionFromPods != null &&
+                            !versionFromCr.messageVersion().equals(highestLogMessageFormatVersionFromPods)) {
+                        LOGGER.infoCr(reconciliation, "Upgrading Kafka log.message.format.version from {} to {}", highestLogMessageFormatVersionFromPods, versionFromCr.messageVersion());
+                    }
                 }
             }
         } else {

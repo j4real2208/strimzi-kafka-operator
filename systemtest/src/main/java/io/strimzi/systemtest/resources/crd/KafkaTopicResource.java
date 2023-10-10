@@ -31,13 +31,19 @@ public class KafkaTopicResource implements ResourceType<KafkaTopic> {
     }
     @Override
     public void create(KafkaTopic resource) {
-        kafkaTopicClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).createOrReplace();
+        kafkaTopicClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).create();
     }
     @Override
     public void delete(KafkaTopic resource) {
         kafkaTopicClient().inNamespace(resource.getMetadata().getNamespace()).withName(
             resource.getMetadata().getName()).withPropagationPolicy(DeletionPropagation.FOREGROUND).delete();
     }
+
+    @Override
+    public void update(KafkaTopic resource) {
+        kafkaTopicClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).update();
+    }
+
     @Override
     public boolean waitForReadiness(KafkaTopic resource) {
         return ResourceManager.waitForResourceStatus(kafkaTopicClient(), resource.getKind(), resource.getMetadata().getNamespace(),
@@ -46,10 +52,6 @@ public class KafkaTopicResource implements ResourceType<KafkaTopic> {
 
     public static MixedOperation<KafkaTopic, KafkaTopicList, Resource<KafkaTopic>> kafkaTopicClient() {
         return Crds.topicOperation(ResourceManager.kubeClient().getClient());
-    }
-
-    public static void replaceTopicResource(String resourceName, Consumer<KafkaTopic> editor) {
-        ResourceManager.replaceCrdResource(KafkaTopic.class, KafkaTopicList.class, resourceName, editor);
     }
 
     public static void replaceTopicResourceInSpecificNamespace(String resourceName, Consumer<KafkaTopic> editor, String namespaceName) {

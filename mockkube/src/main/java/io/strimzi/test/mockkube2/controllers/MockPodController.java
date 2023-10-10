@@ -28,8 +28,17 @@ public class MockPodController extends AbstractMockController {
 
     private Watch watch;
 
+    /**
+     * Annotation to indicate to the Mock Pod controller that this Pod should not be automatically set to ready. This
+     * is used to test failure states.
+     */
     public static final String ANNO_DO_NOT_SET_READY = "mock-pod-controller/do-not-set-ready";
 
+    /**
+     * Constructs the Mock Pod controller
+     *
+     * @param client    Kubernetes client
+     */
     public MockPodController(KubernetesClient client) {
         super(client);
     }
@@ -57,7 +66,7 @@ public class MockPodController extends AbstractMockController {
                                                         .withConditions(new PodConditionBuilder().withType("Ready").withStatus("True").build())
                                                         .build())
                                                 .build())
-                                        .replaceStatus();
+                                        .updateStatus();
                             }
                         } catch (KubernetesClientException e)   {
                             if (e.getCode() == 409) {

@@ -34,7 +34,7 @@ import java.util.Map;
     "replicas", "image", "storage", "config", "livenessProbe", "readinessProbe", "jvmOptions", "jmxOptions", "resources",
     "metricsConfig", "logging", "template"})
 @EqualsAndHashCode
-public class ZookeeperClusterSpec implements HasConfigurableMetrics, UnknownPropertyPreserving, Serializable {
+public class ZookeeperClusterSpec implements HasConfigurableMetrics, HasConfigurableLogging, HasJmxOptions, HasLivenessProbe, HasReadinessProbe, UnknownPropertyPreserving, Serializable {
 
     private static final long serialVersionUID = 1L;
 
@@ -43,8 +43,6 @@ public class ZookeeperClusterSpec implements HasConfigurableMetrics, UnknownProp
             "reconfigEnabled, 4lw.commands.whitelist, secureClientPort, ssl., serverCnxnFactory, sslQuorum";
     public static final String FORBIDDEN_PREFIX_EXCEPTIONS = "ssl.protocol, ssl.quorum.protocol, ssl.enabledProtocols, " +
             "ssl.quorum.enabledProtocols, ssl.ciphersuites, ssl.quorum.ciphersuites, ssl.hostnameVerification, ssl.quorum.hostnameVerification";
-
-    public static final int DEFAULT_REPLICAS = 3;
 
     protected SingleVolumeStorage storage;
     private Map<String, Object> config = new HashMap<>(0);
@@ -82,10 +80,12 @@ public class ZookeeperClusterSpec implements HasConfigurableMetrics, UnknownProp
 
     @Description("Logging configuration for ZooKeeper")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @Override
     public Logging getLogging() {
         return logging;
     }
 
+    @Override
     public void setLogging(Logging logging) {
         this.logging = logging;
     }
@@ -176,7 +176,7 @@ public class ZookeeperClusterSpec implements HasConfigurableMetrics, UnknownProp
     }
 
     @Description("Template for ZooKeeper cluster resources. " +
-            "The template allows users to specify how the `StatefulSet`, `Pods`, and `Services` are generated.")
+            "The template allows users to specify how the Kubernetes resources are generated.")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     public ZookeeperClusterTemplate getTemplate() {
         return template;

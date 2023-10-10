@@ -7,32 +7,30 @@ package io.strimzi.operator.user.operator;
 import io.strimzi.api.kafka.model.AclOperation;
 import io.strimzi.api.kafka.model.AclResourcePatternType;
 import io.strimzi.api.kafka.model.AclRuleType;
+import io.strimzi.operator.user.ResourceUtils;
 import io.strimzi.operator.user.model.acl.SimpleAclRule;
 import io.strimzi.operator.user.model.acl.SimpleAclRuleResource;
 import io.strimzi.operator.user.model.acl.SimpleAclRuleResourceType;
-import io.vertx.junit5.VertxExtension;
-import io.vertx.junit5.VertxTestContext;
 import org.apache.kafka.common.acl.AccessControlEntryFilter;
 import org.apache.kafka.common.acl.AclBinding;
 import org.apache.kafka.common.acl.AclBindingFilter;
 import org.apache.kafka.common.acl.AclPermissionType;
 import org.apache.kafka.common.resource.ResourcePatternFilter;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
-import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 
-@ExtendWith(VertxExtension.class)
-public class SimpleAclOperatorIT extends AbstractAdminApiOperatorIT<Set<SimpleAclRule>, Set<String>> {
+public class SimpleAclOperatorIT extends AdminApiOperatorIT<Set<SimpleAclRule>, Set<String>> {
     @Override
-    AbstractAdminApiOperator<Set<SimpleAclRule>, Set<String>> operator() {
-        return new SimpleAclOperator(vertx, adminClient);
+    AdminApiOperator<Set<SimpleAclRule>, Set<String>> operator() {
+        return new SimpleAclOperator(adminClient, ResourceUtils.createUserOperatorConfig(), Executors.newSingleThreadExecutor());
     }
 
     @Override
@@ -114,7 +112,7 @@ public class SimpleAclOperatorIT extends AbstractAdminApiOperatorIT<Set<SimpleAc
     }
 
     @Override
-    void assertResources(VertxTestContext context, Set<SimpleAclRule> expected, Set<SimpleAclRule> actual) {
+    void assertResources(Set<SimpleAclRule> expected, Set<SimpleAclRule> actual) {
         assertThat(actual, containsInAnyOrder(expected.toArray()));
     }
 }

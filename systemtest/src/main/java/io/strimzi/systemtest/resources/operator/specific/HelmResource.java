@@ -12,28 +12,19 @@ import io.strimzi.systemtest.resources.ResourceManager;
 import io.strimzi.systemtest.utils.kubeUtils.controllers.DeploymentUtils;
 import io.strimzi.systemtest.utils.specific.BridgeUtils;
 import io.strimzi.test.TestUtils;
-import io.strimzi.test.k8s.KubeClusterResource;
 import org.junit.jupiter.api.extension.ExtensionContext;
 
 import java.io.File;
-import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Stack;
 
-import static io.strimzi.test.k8s.KubeClusterResource.cmdKubeClient;
-
 public class HelmResource implements SpecificResourceType {
 
     public static final String HELM_CHART = TestUtils.USER_PATH + "/../packaging/helm-charts/helm3/strimzi-kafka-operator/";
     public static final String HELM_RELEASE_NAME = "strimzi-systemtests";
-
-    public static final String REQUESTS_MEMORY = "512Mi";
-    public static final String REQUESTS_CPU = "200m";
-    public static final String LIMITS_MEMORY = "512Mi";
-    public static final String LIMITS_CPU = "1000m";
 
     private String namespaceToWatch;
     private String namespaceInstallTo;
@@ -48,13 +39,13 @@ public class HelmResource implements SpecificResourceType {
     }
 
     public void create(ExtensionContext extensionContext) {
-        this.create(extensionContext, Constants.CO_OPERATION_TIMEOUT_DEFAULT, Constants.RECONCILIATION_INTERVAL, null);
+        this.create(extensionContext, Constants.CO_OPERATION_TIMEOUT_DEFAULT, Constants.RECONCILIATION_INTERVAL, null, 1);
     }
 
-    public void create(ExtensionContext extensionContext, long operationTimeout, long reconciliationInterval, List<EnvVar> extraEnvVars) {
+    public void create(ExtensionContext extensionContext, long operationTimeout, long reconciliationInterval, List<EnvVar> extraEnvVars, int replicas) {
         ResourceManager.STORED_RESOURCES.computeIfAbsent(extensionContext.getDisplayName(), k -> new Stack<>());
         ResourceManager.STORED_RESOURCES.get(extensionContext.getDisplayName()).push(new ResourceItem(this::delete));
-        this.clusterOperator(operationTimeout, reconciliationInterval, extraEnvVars);
+        this.clusterOperator(operationTimeout, reconciliationInterval, extraEnvVars, replicas);
     }
 
     @Override
@@ -62,7 +53,7 @@ public class HelmResource implements SpecificResourceType {
         this.deleteClusterOperator();
     }
 
-    private void clusterOperator(long operationTimeout, long reconciliationInterval, List<EnvVar> extraEnvVars) {
+    private void clusterOperator(long operationTimeout, long reconciliationInterval, List<EnvVar> extraEnvVars, int replicas) {
 
         Map<String, Object> values = new HashMap<>();
         // image registry config
@@ -75,20 +66,22 @@ public class HelmResource implements SpecificResourceType {
 
         // image tags config
         values.put("defaultImageTag", Environment.STRIMZI_TAG);
-        values.put("kafkaBridge.image.tag", Environment.useLatestReleasedBridge() ? "latest" : BridgeUtils.getBridgeVersion());
+        values.put("kafkaBridge.image.tag", BridgeUtils.getBridgeVersion());
 
         // Additional config
         values.put("image.imagePullPolicy", Environment.OPERATOR_IMAGE_PULL_POLICY);
-        values.put("resources.requests.memory", REQUESTS_MEMORY);
-        values.put("resources.requests.cpu", REQUESTS_CPU);
-        values.put("resources.limits.memory", LIMITS_MEMORY);
-        values.put("resources.limits.cpu", LIMITS_CPU);
+        values.put("resources.requests.memory", Constants.CO_REQUESTS_MEMORY);
+        values.put("resources.requests.cpu", Constants.CO_REQUESTS_CPU);
+        values.put("resources.limits.memory", Constants.CO_LIMITS_MEMORY);
+        values.put("resources.limits.cpu", Constants.CO_LIMITS_CPU);
         values.put("logLevelOverride", Environment.STRIMZI_LOG_LEVEL);
         values.put("fullReconciliationIntervalMs", Long.toString(reconciliationInterval));
         values.put("operationTimeoutMs", Long.toString(operationTimeout));
         // As FG is CSV, we need to escape commas for interpretation of helm installation string
         values.put("featureGates", Environment.STRIMZI_FEATURE_GATES.replaceAll(",", "\\\\,"));
         values.put("watchAnyNamespace", this.namespaceToWatch.equals(Constants.WATCH_ALL_NAMESPACES));
+        values.put("replicas", replicas);
+
         if (!this.namespaceToWatch.equals("*") && !this.namespaceToWatch.equals(this.namespaceInstallTo)) {
             values.put("watchNamespaces", buildWatchNamespaces());
         }
@@ -104,13 +97,8 @@ public class HelmResource implements SpecificResourceType {
         }
 
         Path pathToChart = new File(HELM_CHART).toPath();
-        String oldNamespace = KubeClusterResource.getInstance().setNamespace("kube-system");
-        InputStream helmAccountAsStream = HelmResource.class.getClassLoader().getResourceAsStream("helm/helm-service-account.yaml");
-        String helmServiceAccount = TestUtils.readResource(helmAccountAsStream);
-        cmdKubeClient().applyContent(helmServiceAccount);
-        KubeClusterResource.getInstance().setNamespace(oldNamespace);
-        ResourceManager.helmClient().install(pathToChart, HELM_RELEASE_NAME, values);
-        DeploymentUtils.waitForDeploymentReady(ResourceManager.getCoDeploymentName());
+        ResourceManager.helmClient().namespace(namespaceInstallTo).install(pathToChart, HELM_RELEASE_NAME, values);
+        DeploymentUtils.waitForDeploymentReady(namespaceInstallTo, ResourceManager.getCoDeploymentName());
     }
 
     /**
@@ -132,9 +120,11 @@ public class HelmResource implements SpecificResourceType {
 
     /**
      * Delete CO deployed via helm chart.
+     * NOTE: CRDs are not deleted as part of the uninstallation:
+     * <a href="https://github.com/helm/community/blob/f9e06c16d89ccea1bea77c01a6a96ae3b309f823/architecture/crds.md#deleting-crds">CRDs architecture in Helm</a>
      */
     private void deleteClusterOperator() {
         ResourceManager.helmClient().delete(namespaceInstallTo, HELM_RELEASE_NAME);
-        DeploymentUtils.waitForDeploymentDeletion(ResourceManager.getCoDeploymentName());
+        DeploymentUtils.waitForDeploymentDeletion(namespaceInstallTo, ResourceManager.getCoDeploymentName());
     }
 }

@@ -18,7 +18,7 @@ import static java.util.Collections.singletonMap;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class PodDisruptionBudgetOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, PodDisruptionBudget, PodDisruptionBudgetList, Resource<PodDisruptionBudget>> {
+public class PodDisruptionBudgetOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, PodDisruptionBudget, PodDisruptionBudgetList, Resource<PodDisruptionBudget>> {
 
     @Override
     protected void  mocker(KubernetesClient mockClient, MixedOperation op) {
@@ -30,7 +30,7 @@ public class PodDisruptionBudgetOperatorTest extends AbstractResourceOperatorTes
     }
 
     @Override
-    protected AbstractResourceOperator<KubernetesClient, PodDisruptionBudget, PodDisruptionBudgetList, Resource<PodDisruptionBudget>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
+    protected AbstractNamespacedResourceOperator<KubernetesClient, PodDisruptionBudget, PodDisruptionBudgetList, Resource<PodDisruptionBudget>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
         return new PodDisruptionBudgetOperator(vertx, mockClient);
     }
 
@@ -45,10 +45,10 @@ public class PodDisruptionBudgetOperatorTest extends AbstractResourceOperatorTes
     }
 
     @Override
-    protected PodDisruptionBudget resource() {
+    protected PodDisruptionBudget resource(String name) {
         return new PodDisruptionBudgetBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo", "bar"))
                 .endMetadata()
@@ -59,8 +59,8 @@ public class PodDisruptionBudgetOperatorTest extends AbstractResourceOperatorTes
     }
 
     @Override
-    protected PodDisruptionBudget modifiedResource() {
-        return new PodDisruptionBudgetBuilder(resource())
+    protected PodDisruptionBudget modifiedResource(String name) {
+        return new PodDisruptionBudgetBuilder(resource(name))
                 .editSpec()
                     .withNewMaxUnavailable(2)
                 .endSpec()

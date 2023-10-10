@@ -9,14 +9,41 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.zjsonpatch.JsonDiff;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
+import io.strimzi.operator.common.model.AbstractJsonDiff;
 
 import java.util.regex.Pattern;
 
-class ResourceDiff<T extends HasMetadata> extends AbstractJsonDiff {
+/**
+ * Diffs two Kubernetes resources of the same type to see if the changed
+ *
+ * @param <T>   Type of the resource which is being diffed
+ */
+public class ResourceDiff<T extends HasMetadata> extends AbstractJsonDiff {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(ResourceDiff.class.getName());
+
+    /**
+     * Pattern with JSON paths which should be ignored if they differ
+     */
+    public static final Pattern DEFAULT_IGNORABLE_PATHS = Pattern.compile(
+            "^(/metadata/managedFields" +
+                    "|/metadata/creationTimestamp" +
+                    "|/metadata/resourceVersion" +
+                    "|/metadata/generation" +
+                    "|/metadata/uid" +
+                    "|/status)$");
 
     private final boolean isEmpty;
 
+    /**
+     * Constructs the diff
+     *
+     * @param reconciliation    Reconciliation marker
+     * @param resourceKind      Kind of the resource
+     * @param resourceName      Name of the resource
+     * @param current           Current resource
+     * @param desired           Desired resource
+     * @param ignorableFields   Pattern with fields which should be ignored
+     */
     public ResourceDiff(Reconciliation reconciliation, String resourceKind, String resourceName, T current, T desired, Pattern ignorableFields) {
         JsonNode source = PATCH_MAPPER.valueToTree(current == null ? "{}" : current);
         JsonNode target = PATCH_MAPPER.valueToTree(desired == null ? "{}" : desired);

@@ -37,7 +37,7 @@ import java.util.Map;
     "version", "replicas", "image", "listeners", "config", "storage", "authorization", "rack", "brokerRackInitImage",
     "livenessProbe", "readinessProbe", "jvmOptions", "jmxOptions", "resources", "metricsConfig", "logging", "template"})
 @EqualsAndHashCode
-public class KafkaClusterSpec implements HasConfigurableMetrics, UnknownPropertyPreserving, Serializable {
+public class KafkaClusterSpec implements HasConfigurableMetrics, HasConfigurableLogging, HasJmxOptions, HasReadinessProbe, HasLivenessProbe, UnknownPropertyPreserving, Serializable {
 
     private static final long serialVersionUID = 1L;
 
@@ -45,9 +45,10 @@ public class KafkaClusterSpec implements HasConfigurableMetrics, UnknownProperty
             + "inter.broker.listener.name, sasl., ssl., security., password., log.dir, "
             + "zookeeper.connect, zookeeper.set.acl, zookeeper.ssl, zookeeper.clientCnxnSocket, authorizer., super.user, "
             + "cruise.control.metrics.topic, cruise.control.metrics.reporter.bootstrap.servers,"
-            + "node.id, process.roles, controller."; // KRaft options
+            + "node.id, process.roles, controller., metadata.log.dir"; // KRaft options
 
-    public static final String FORBIDDEN_PREFIX_EXCEPTIONS = "zookeeper.connection.timeout.ms, ssl.cipher.suites, ssl.protocol, ssl.enabled.protocols,"
+    public static final String FORBIDDEN_PREFIX_EXCEPTIONS = "zookeeper.connection.timeout.ms, sasl.server.max.receive.size,"
+            + "ssl.cipher.suites, ssl.protocol, ssl.enabled.protocols, ssl.secure.random.implementation,"
             + "cruise.control.metrics.topic.num.partitions, cruise.control.metrics.topic.replication.factor, cruise.control.metrics.topic.retention.ms,"
             + "cruise.control.metrics.topic.auto.create.retries, cruise.control.metrics.topic.auto.create.timeout.ms,"
             + "cruise.control.metrics.topic.min.insync.replicas,"
@@ -125,10 +126,12 @@ public class KafkaClusterSpec implements HasConfigurableMetrics, UnknownProperty
 
     @Description("Logging configuration for Kafka")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @Override
     public Logging getLogging() {
         return logging;
     }
 
+    @Override
     public void setLogging(Logging logging) {
         this.logging = logging;
     }
@@ -240,7 +243,7 @@ public class KafkaClusterSpec implements HasConfigurableMetrics, UnknownProperty
     }
 
     @Description("Template for Kafka cluster resources. " +
-            "The template allows users to specify how the `StatefulSet`, `Pods`, and `Services` are generated.")
+            "The template allows users to specify how the Kubernetes resources are generated.")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     public KafkaClusterTemplate getTemplate() {
         return template;

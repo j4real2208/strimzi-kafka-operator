@@ -17,17 +17,21 @@ import io.fabric8.kubernetes.client.dsl.MixedOperation;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
+import io.strimzi.api.kafka.KafkaConnectList;
 import io.strimzi.api.kafka.KafkaList;
+import io.strimzi.api.kafka.KafkaMirrorMaker2List;
 import io.strimzi.api.kafka.StrimziPodSetList;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaBuilder;
+import io.strimzi.api.kafka.model.KafkaConnect;
+import io.strimzi.api.kafka.model.KafkaMirrorMaker2;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.StrimziPodSetBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.operator.cluster.ResourceUtils;
 import io.strimzi.operator.cluster.model.PodSetUtils;
-import io.strimzi.operator.cluster.operator.resource.PodRevision;
+import io.strimzi.operator.cluster.model.PodRevision;
 import io.strimzi.operator.common.operator.resource.StrimziPodSetOperator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.Labels;
@@ -75,6 +79,8 @@ public class StrimziPodSetControllerIT {
     private static StrimziPodSetController controller;
 
     private static CrdOperator<KubernetesClient, Kafka, KafkaList> kafkaOperator;
+    private static CrdOperator<KubernetesClient, KafkaConnect, KafkaConnectList> kafkaConnectOperator;
+    private static CrdOperator<KubernetesClient, KafkaMirrorMaker2, KafkaMirrorMaker2List> kafkaMirrorMaker2Operator;
     private static StrimziPodSetOperator podSetOperator;
     private static PodOperator podOperator;
 
@@ -96,7 +102,7 @@ public class StrimziPodSetControllerIT {
         cmdKubeClient().waitForResourceCreation("Namespace", NAMESPACE);
 
         LOGGER.info("Creating CRDs");
-        cluster.createCustomResources(TestUtils.CRD_KAFKA, TestUtils.CRD_STRIMZI_POD_SET);
+        cluster.createCustomResources(TestUtils.CRD_KAFKA, TestUtils.CRD_KAFKA_CONNECT, TestUtils.CRD_KAFKA_MIRROR_MAKER_2, TestUtils.CRD_STRIMZI_POD_SET);
         cluster.waitForCustomResourceDefinition(Kafka.CRD_NAME);
         cluster.waitForCustomResourceDefinition(StrimziPodSet.CRD_NAME);
         LOGGER.info("Created CRDs");
@@ -104,7 +110,9 @@ public class StrimziPodSetControllerIT {
         client = new KubernetesClientBuilder().build();
         vertx = Vertx.vertx();
         kafkaOperator = new CrdOperator<>(vertx, client, Kafka.class, KafkaList.class, Kafka.RESOURCE_KIND);
-        podSetOperator = new StrimziPodSetOperator(vertx, client, 60_000L);
+        kafkaConnectOperator = new CrdOperator<>(vertx, client, KafkaConnect.class, KafkaConnectList.class, KafkaConnect.RESOURCE_KIND);
+        kafkaMirrorMaker2Operator = new CrdOperator<>(vertx, client, KafkaMirrorMaker2.class, KafkaMirrorMaker2List.class, KafkaMirrorMaker2.RESOURCE_KIND);
+        podSetOperator = new StrimziPodSetOperator(vertx, client);
         podOperator = new PodOperator(vertx, client);
 
         kafkaOp().inNamespace(NAMESPACE).resource(kafka(KAFKA_NAME, MATCHING_LABELS)).create();
@@ -192,7 +200,7 @@ public class StrimziPodSetControllerIT {
                     .withNewMetadata()
                         .withName(name)
                         .withNamespace(NAMESPACE)
-                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, kafkaName, Labels.STRIMZI_NAME_LABEL, podSetName))
+                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, kafkaName, Labels.STRIMZI_NAME_LABEL, podSetName, Labels.STRIMZI_CONTROLLER_LABEL, "strimzipodset"))
                         .withAnnotations(new HashMap<>())
                     .endMetadata()
                     .withNewSpec()
@@ -228,7 +236,7 @@ public class StrimziPodSetControllerIT {
     }
 
     private static void startController()  {
-        controller = new StrimziPodSetController(NAMESPACE, Labels.fromMap(MATCHING_LABELS), kafkaOperator, podSetOperator, podOperator, ResourceUtils.metricsProvider(), POD_SET_CONTROLLER_WORK_QUEUE_SIZE);
+        controller = new StrimziPodSetController(NAMESPACE, Labels.fromMap(MATCHING_LABELS), kafkaOperator, kafkaConnectOperator, kafkaMirrorMaker2Operator, podSetOperator, podOperator, ResourceUtils.metricsProvider(), POD_SET_CONTROLLER_WORK_QUEUE_SIZE);
         controller.start();
     }
 

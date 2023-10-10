@@ -19,12 +19,18 @@ import java.util.regex.Pattern;
 /**
  * Operations for {@code PersistentVolumeClaim}s.
  */
-public class PvcOperator extends AbstractResourceOperator<KubernetesClient, PersistentVolumeClaim, PersistentVolumeClaimList, Resource<PersistentVolumeClaim>> {
+public class PvcOperator extends AbstractNamespacedResourceOperator<KubernetesClient, PersistentVolumeClaim, PersistentVolumeClaimList, Resource<PersistentVolumeClaim>> {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(PvcOperator.class);
-    protected static final Pattern IGNORABLE_PATHS = Pattern.compile(
+    private static final Pattern IGNORABLE_PATHS = Pattern.compile(
             "^(/metadata/managedFields" +
-                    "|/metadata/annotations/pv.kubernetes.io~1bind-completed" +
+                    "|/metadata/annotations/pv.kubernetes.io~1.*" +
+                    "|/metadata/annotations/volume.beta.kubernetes.io~1.*" +
+                    "|/metadata/annotations/volume.kubernetes.io~1.*" +
                     "|/metadata/finalizers" +
+                    "|/metadata/creationTimestamp" +
+                    "|/metadata/resourceVersion" +
+                    "|/metadata/generation" +
+                    "|/metadata/uid" +
                     "|/status)$");
 
 
@@ -65,13 +71,13 @@ public class PvcOperator extends AbstractResourceOperator<KubernetesClient, Pers
      * @return  Future with reconciliation result
      */
     @Override
-    protected Future<ReconcileResult<PersistentVolumeClaim>> internalPatch(Reconciliation reconciliation, String namespace, String name, PersistentVolumeClaim current, PersistentVolumeClaim desired) {
+    protected Future<ReconcileResult<PersistentVolumeClaim>> internalUpdate(Reconciliation reconciliation, String namespace, String name, PersistentVolumeClaim current, PersistentVolumeClaim desired) {
         try {
             if (current.getSpec() != null && desired.getSpec() != null)   {
                 revertImmutableChanges(current, desired);
             }
 
-            return super.internalPatch(reconciliation, namespace, name, current, desired);
+            return super.internalUpdate(reconciliation, namespace, name, current, desired);
         } catch (Exception e) {
             LOGGER.errorCr(reconciliation, "Caught exception while patching {} {} in namespace {}", resourceKind, name, namespace, e);
             return Future.failedFuture(e);

@@ -22,14 +22,14 @@ For more information on using `Kafka` and `KafkaUser` resources to secure access
 
 .Prerequisites
 
-* A running Kafka cluster xref:con-securing-kafka-authentication-{context}[configured with a Kafka broker listener using TLS authentication and encryption].
-* A running User Operator (typically xref:assembly-kafka-entity-operator-str[deployed with the Entity Operator]).
+* A running Kafka cluster configured with a Kafka broker listener using mTLS authentication and TLS encryption.
+* A running User Operator (typically deployed with the Entity Operator).
 
 .Procedure
 
 . Configure the `KafkaUser` resource.
 +
-This example specifies TLS authentication and simple authorization using ACLs.
+This example specifies mTLS authentication and simple authorization using ACLs.
 +
 .Example Kafka user configuration
 [source,yaml,subs="attributes+"]
@@ -37,7 +37,7 @@ This example specifies TLS authentication and simple authorization using ACLs.
 apiVersion: {KafkaUserApiVersion}
 kind: KafkaUser
 metadata:
-  name: my-user
+  name: my-user-1
   labels:
     strimzi.io/cluster: my-cluster
 spec:
@@ -51,38 +51,26 @@ spec:
           type: topic
           name: my-topic
           patternType: literal
-        operation: Read
-        host: "*"
-      - resource:
-          type: topic
-          name: my-topic
-          patternType: literal
-        operation: Describe
+        operations:
+          - Describe
+          - Read
         host: "*"
       - resource:
           type: group
           name: my-group
           patternType: literal
-        operation: Read
+        operations:
+          - Read
         host: "*"
       # Example Producer Acls for topic my-topic
       - resource:
           type: topic
           name: my-topic
           patternType: literal
-        operation: Write
-        host: "*"
-      - resource:
-          type: topic
-          name: my-topic
-          patternType: literal
-        operation: Create
-        host: "*"
-      - resource:
-          type: topic
-          name: my-topic
-          patternType: literal
-        operation: Describe
+        operations:
+          - Create
+          - Describe
+          - Write
         host: "*"
 ----
 

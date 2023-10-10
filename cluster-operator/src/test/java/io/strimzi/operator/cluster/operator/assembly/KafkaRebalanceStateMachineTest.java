@@ -22,7 +22,7 @@ import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.cruisecontrol.AbstractRebalanceOptions;
 import io.strimzi.operator.cluster.operator.resource.cruisecontrol.CruiseControlApi;
 import io.strimzi.operator.cluster.operator.resource.cruisecontrol.CruiseControlApiImpl;
-import io.strimzi.operator.cluster.operator.resource.cruisecontrol.CruiseControlEndpoints;
+import io.strimzi.operator.common.model.cruisecontrol.CruiseControlEndpoints;
 import io.strimzi.operator.cluster.operator.resource.cruisecontrol.MockCruiseControl;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
@@ -149,7 +149,7 @@ public class KafkaRebalanceStateMachineTest {
      * @param vertx The vertx test instance.
      * @param context The test context instance.
      * @param currentState The current state of the resource before being passed to computeNextStatus.
-     * @param nextState The expected state of the resouce after computeNextStatus has been called.
+     * @param nextState The expected state of the resource after computeNextStatus has been called.
      * @param initialAnnotation The initial annotation attached to the Kafka Rebalance resource. For example none or refresh.
      * @param kcRebalance The Kafka Rebalance instance that will be returned by the resourceSupplier.
      * @return A future for the {@link KafkaRebalanceStatus} returned by the {@link KafkaRebalanceAssemblyOperator#computeNextStatus} method
@@ -312,16 +312,13 @@ public class KafkaRebalanceStateMachineTest {
         checkTransition(vertx, context,
                 KafkaRebalanceState.New, KafkaRebalanceState.NotReady,
                 KafkaRebalanceAnnotation.none, kcRebalance)
-                .onComplete(result -> {
-                    if (result.failed()) {
-                        if (result.cause().getMessage().contains("java.lang.IllegalArgumentException: Missing hard goals")) {
-                            context.completeNow();
-                        } else {
-                            context.failNow(new RuntimeException("This operation failed with an unexpected error:" + result.cause().getMessage()));
-                        }
+                .onComplete(context.failing(throwable -> {
+                    if (throwable.getMessage().contains("java.lang.IllegalArgumentException: Missing hard goals")) {
+                        context.completeNow();
+                    } else {
+                        context.failNow(new RuntimeException("This operation failed with an unexpected error: " + throwable.getMessage(), throwable));
                     }
-                    context.failNow(new RuntimeException("This operations should have failed"));
-                });
+                }));
     }
 
     @Test
@@ -342,7 +339,7 @@ public class KafkaRebalanceStateMachineTest {
                 .withSkipHardGoalCheck(true)
                 .build();
         kcRebalance = createKafkaRebalance(KafkaRebalanceState.New, null, null, rebalanceSpec, null, false);
-        this.krNewBadGoalsError(vertx, context, CruiseControlEndpoints.ADD_BROKER, kcRebalance);
+        this.krNewBadGoalsErrorWithSkipHGCheck(vertx, context, CruiseControlEndpoints.ADD_BROKER, kcRebalance);
 
         rebalanceSpec = new KafkaRebalanceSpecBuilder()
                 .withMode(KafkaRebalanceMode.REMOVE_BROKERS)
@@ -351,7 +348,7 @@ public class KafkaRebalanceStateMachineTest {
                 .withSkipHardGoalCheck(true)
                 .build();
         kcRebalance = createKafkaRebalance(KafkaRebalanceState.New, null, null, rebalanceSpec, null, false);
-        this.krNewBadGoalsError(vertx, context, CruiseControlEndpoints.REMOVE_BROKER, kcRebalance);
+        this.krNewBadGoalsErrorWithSkipHGCheck(vertx, context, CruiseControlEndpoints.REMOVE_BROKER, kcRebalance);
     }
 
     private void krNewBadGoalsErrorWithSkipHGCheck(Vertx vertx, VertxTestContext context, CruiseControlEndpoints endpoint, KafkaRebalance kcRebalance) throws IOException, URISyntaxException {

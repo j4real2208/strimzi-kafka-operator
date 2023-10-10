@@ -20,10 +20,10 @@ import io.strimzi.api.kafka.model.KafkaUserTlsExternalClientAuthentication;
 import io.strimzi.certs.CertAndKey;
 import io.strimzi.certs.CertManager;
 import io.strimzi.certs.OpenSslCertManager;
-import io.strimzi.operator.cluster.model.Ca;
-import io.strimzi.operator.cluster.model.ClientsCa;
-import io.strimzi.operator.cluster.model.InvalidResourceException;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.common.model.ClientsCa;
+import io.strimzi.operator.common.model.InvalidResourceException;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
@@ -43,10 +43,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * Model of the Kafka user which is created based on the KafkaUser custom resource
+ */
 public class KafkaUserModel {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(KafkaUserModel.class.getName());
 
+    /**
+     * Key under which the password is stored in the Kubernetes Secret
+     */
     public static final String KEY_PASSWORD = "password";
+
+    /**
+     * Key under which the SASL configuration is stored in the Kubernetes Secret
+     */
     public static final String KEY_SASL_JAAS_CONFIG = "sasl.jaas.config";
 
     protected final String namespace;
@@ -59,6 +69,9 @@ public class KafkaUserModel {
     protected String scramSha512Password;
     protected Set<SimpleAclRule> simpleAclRules = null;
 
+    /**
+     * Name of the USer Operator used for the Kubernetes labels
+     */
     public static final String KAFKA_USER_OPERATOR_NAME = "strimzi-user-operator";
 
     // Owner Reference information
@@ -92,27 +105,19 @@ public class KafkaUserModel {
     /**
      * Creates instance of KafkaUserModel from CRD definition.
      *
-     * @param kafkaUser The Custom Resource based on which the model should be created.
-     * @param secretPrefix The prefix used to add to the name of the Secret generated from the KafkaUser resource.
-     * @param aclsAdminApiSupported Indicates whether Kafka Admin API can be used to manage ACL rights
-     * @param kraftEnabled Indicates whether KRaft is enabled in the Kafka cluster
+     * @param kafkaUser                 The Custom Resource based on which the model should be created.
+     * @param secretPrefix              The prefix used to add to the name of the Secret generated from the KafkaUser resource.
+     * @param aclsAdminApiSupported     Indicates whether Kafka Admin API can be used to manage ACL rights
      *
      * @return The user model.
      */
     public static KafkaUserModel fromCrd(KafkaUser kafkaUser,
                                          String secretPrefix,
-                                         boolean aclsAdminApiSupported,
-                                         boolean kraftEnabled) {
+                                         boolean aclsAdminApiSupported) {
         KafkaUserModel result = new KafkaUserModel(kafkaUser.getMetadata().getNamespace(),
                 kafkaUser.getMetadata().getName(),
                 Labels.fromResource(kafkaUser).withStrimziKind(kafkaUser.getKind()),
                 secretPrefix);
-
-        if (kafkaUser.getSpec().getAuthentication() != null && kafkaUser.getSpec().getAuthentication().getType().equals(KafkaUserScramSha512ClientAuthentication.TYPE_SCRAM_SHA_512)) {
-            if (kraftEnabled) {
-                throw new InvalidResourceException("SCRAM-SHA-512 authentication is currently not supported in KRaft based Kafka clusters.");
-            }
-        }
 
         validateTlsUsername(kafkaUser);
         validateDesiredPassword(kafkaUser);
@@ -161,9 +166,7 @@ public class KafkaUserModel {
      * @param user  The KafkaUser which should be validated
      */
     private static void validateDesiredPassword(KafkaUser user)  {
-        if (user.getSpec().getAuthentication() instanceof KafkaUserScramSha512ClientAuthentication) {
-            KafkaUserScramSha512ClientAuthentication scramAuth = (KafkaUserScramSha512ClientAuthentication) user.getSpec().getAuthentication();
-
+        if (user.getSpec().getAuthentication() instanceof KafkaUserScramSha512ClientAuthentication scramAuth) {
             if (scramAuth.getPassword() != null)    {
                 if (scramAuth.getPassword().getValueFrom() == null
                         || scramAuth.getPassword().getValueFrom().getSecretKeyRef() == null
@@ -428,7 +431,7 @@ public class KafkaUserModel {
      * Decodes the name of the User secret based on the username
      *
      * @param username The username.
-     * @return The decoded user name.
+     * @return The decoded username.
      */
     public static String decodeUsername(String username) {
         if (username.contains("CN="))   {
@@ -448,7 +451,7 @@ public class KafkaUserModel {
      * Generates the name of the User secret based on the username
      *
      * @param username The username.
-     * @return The TLS user name.
+     * @return The TLS username.
      */
     public static String getTlsUserName(String username)    {
         return "CN=" + username;
@@ -458,7 +461,7 @@ public class KafkaUserModel {
      * Generates the name of the User secret based on the username
      *
      * @param username The username.
-     * @return The SCRAM user name.
+     * @return The SCRAM username.
      */
     public static String getScramUserName(String username)    {
         return username;
@@ -562,7 +565,7 @@ public class KafkaUserModel {
         Set<SimpleAclRule> simpleAclRules = new HashSet<>();
 
         for (AclRule rule : rules)  {
-            simpleAclRules.add(SimpleAclRule.fromCrd(rule));
+            simpleAclRules.addAll(SimpleAclRule.fromCrd(rule));
         }
 
         this.simpleAclRules = simpleAclRules;

@@ -14,7 +14,7 @@ import io.vertx.core.Vertx;
 
 import static org.mockito.Mockito.when;
 
-public class ImageStreamOperatorTest extends AbstractResourceOperatorTest<OpenShiftClient, ImageStream, ImageStreamList, Resource<ImageStream>> {
+public class ImageStreamOperatorTest extends AbstractNamespacedResourceOperatorTest<OpenShiftClient, ImageStream, ImageStreamList, Resource<ImageStream>> {
 
     @Override
     protected Class<OpenShiftClient> clientType() {
@@ -27,21 +27,21 @@ public class ImageStreamOperatorTest extends AbstractResourceOperatorTest<OpenSh
     }
 
     @Override
-    protected ImageStream resource() {
+    protected ImageStream resource(String name) {
         return new ImageStreamBuilder()
                 .withNewMetadata()
                     .withNamespace(NAMESPACE)
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                 .endMetadata()
                 .build();
     }
 
     @Override
-    protected ImageStream modifiedResource() {
+    protected ImageStream modifiedResource(String name) {
         return new ImageStreamBuilder()
                 .withNewMetadata()
                     .withNamespace(NAMESPACE)
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .addToLabels("foo", "bar")
                 .endMetadata()
                 .build();
@@ -53,7 +53,7 @@ public class ImageStreamOperatorTest extends AbstractResourceOperatorTest<OpenSh
     }
 
     @Override
-    protected AbstractResourceOperator<OpenShiftClient, ImageStream, ImageStreamList, Resource<ImageStream>> createResourceOperations(Vertx vertx, OpenShiftClient mockClient) {
+    protected AbstractNamespacedResourceOperator<OpenShiftClient, ImageStream, ImageStreamList, Resource<ImageStream>> createResourceOperations(Vertx vertx, OpenShiftClient mockClient) {
         return new ImageStreamOperator(vertx, mockClient);
     }
 

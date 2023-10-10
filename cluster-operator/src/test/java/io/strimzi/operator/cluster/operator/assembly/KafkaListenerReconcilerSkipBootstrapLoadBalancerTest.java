@@ -10,21 +10,24 @@ import io.strimzi.api.kafka.model.KafkaBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.api.kafka.model.status.ListenerStatus;
-import io.strimzi.platform.KubernetesVersion;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.model.MockSharedEnvironmentProvider;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
 import io.strimzi.operator.cluster.model.KafkaCluster;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.KafkaVersion;
+import io.strimzi.operator.cluster.model.nodepools.NodePoolUtils;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.common.Reconciliation;
+import io.strimzi.operator.cluster.model.SharedEnvironmentProvider;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.resource.IngressOperator;
-import io.strimzi.operator.common.operator.resource.IngressV1Beta1Operator;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.strimzi.operator.common.operator.resource.RouteOperator;
 import io.strimzi.operator.common.operator.resource.SecretOperator;
 import io.strimzi.operator.common.operator.resource.ServiceOperator;
+import io.strimzi.platform.KubernetesVersion;
 import io.vertx.core.Future;
 import io.vertx.junit5.Checkpoint;
 import io.vertx.junit5.VertxExtension;
@@ -33,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -49,6 +53,7 @@ import static org.mockito.Mockito.when;
 @ExtendWith(VertxExtension.class)
 public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
     public static final String NAMESPACE = "test";
     public static final String CLUSTER_NAME = "my-kafka";
     public static final String DNS_NAME_FOR_BROKER_0 = "broker-0.test.dns.name";
@@ -92,19 +97,19 @@ public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
                     .endEntityOperator()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         ResourceOperatorSupplier supplier = prepareResourceOperatorSupplier();
 
         MockKafkaListenersReconciler reconciler = new MockKafkaListenersReconciler(
                 new Reconciliation("test-trigger", Kafka.RESOURCE_KIND, NAMESPACE, CLUSTER_NAME),
                 kafkaCluster,
-                new PlatformFeaturesAvailability(false, KubernetesVersion.V1_16),
+                new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION),
                 supplier.secretOperations,
                 supplier.serviceOperations,
                 supplier.routeOperations,
-                supplier.ingressOperations,
-                supplier.ingressV1Beta1Operations
+                supplier.ingressOperations
         );
 
         Checkpoint async = context.checkpoint();
@@ -167,19 +172,19 @@ public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
                     .endEntityOperator()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         ResourceOperatorSupplier supplier = prepareResourceOperatorSupplier();
 
         MockKafkaListenersReconciler reconciler = new MockKafkaListenersReconciler(
                 new Reconciliation("test-trigger", Kafka.RESOURCE_KIND, NAMESPACE, CLUSTER_NAME),
                 kafkaCluster,
-                new PlatformFeaturesAvailability(false, KubernetesVersion.V1_16),
+                new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION),
                 supplier.secretOperations,
                 supplier.serviceOperations,
                 supplier.routeOperations,
-                supplier.ingressOperations,
-                supplier.ingressV1Beta1Operations
+                supplier.ingressOperations
         );
 
         Checkpoint async = context.checkpoint();
@@ -236,19 +241,19 @@ public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
                     .endEntityOperator()
                 .endSpec()
                 .build();
-        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kafkaCluster = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         ResourceOperatorSupplier supplier = prepareResourceOperatorSupplier();
 
         MockKafkaListenersReconciler reconciler = new MockKafkaListenersReconciler(
                 new Reconciliation("test-trigger", Kafka.RESOURCE_KIND, NAMESPACE, CLUSTER_NAME),
                 kafkaCluster,
-                new PlatformFeaturesAvailability(false, KubernetesVersion.V1_16),
+                new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION),
                 supplier.secretOperations,
                 supplier.serviceOperations,
                 supplier.routeOperations,
-                supplier.ingressOperations,
-                supplier.ingressV1Beta1Operations
+                supplier.ingressOperations
         );
 
         Checkpoint async = context.checkpoint();
@@ -288,6 +293,9 @@ public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
         // Mock the ServiceOperator for the kafka services.
         ServiceOperator mockServiceOperator = supplier.serviceOperations;
 
+        // Delegate the batchReconcile call to the real method which calls the other mocked methods. This allows us to better test the exact behavior.
+        when(mockServiceOperator.batchReconcile(any(), eq(NAMESPACE), any(), any())).thenCallRealMethod();
+
         // Mock getting of services and their readiness
         when(mockServiceOperator.getAsync(eq(NAMESPACE), eq(CLUSTER_NAME + "-kafka-external-bootstrap"))).thenReturn(Future.succeededFuture(mockServiceBootstrap));
         when(mockServiceOperator.getAsync(eq(NAMESPACE), eq(CLUSTER_NAME + "-kafka-0"))).thenReturn(Future.succeededFuture(mockServiceBroker0));
@@ -319,9 +327,8 @@ public class KafkaListenerReconcilerSkipBootstrapLoadBalancerTest {
                 SecretOperator secretOperator,
                 ServiceOperator serviceOperator,
                 RouteOperator routeOperator,
-                IngressOperator ingressOperator,
-                IngressV1Beta1Operator ingressV1Beta1Operator) {
-            super(reconciliation, kafka, null, pfa, 300_000L, secretOperator, serviceOperator, routeOperator, ingressOperator, ingressV1Beta1Operator);
+                IngressOperator ingressOperator) {
+            super(reconciliation, kafka, null, pfa, 300_000L, secretOperator, serviceOperator, routeOperator, ingressOperator);
         }
 
         @Override

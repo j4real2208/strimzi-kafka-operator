@@ -10,7 +10,6 @@ import io.fabric8.kubernetes.api.model.Affinity;
 import io.fabric8.kubernetes.api.model.AffinityBuilder;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.fabric8.kubernetes.api.model.LabelSelector;
 import io.fabric8.kubernetes.api.model.NodeSelectorRequirement;
 import io.fabric8.kubernetes.api.model.NodeSelectorRequirementBuilder;
 import io.fabric8.kubernetes.api.model.NodeSelectorTerm;
@@ -21,32 +20,23 @@ import io.fabric8.kubernetes.api.model.Quantity;
 import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
-import io.fabric8.kubernetes.api.model.Toleration;
-import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicyPeer;
 import io.strimzi.api.kafka.model.CertificateAuthority;
-import io.strimzi.api.kafka.model.HasConfigurableMetrics;
-import io.strimzi.api.kafka.model.JvmOptions;
-import io.strimzi.api.kafka.model.SystemProperty;
-import io.strimzi.api.kafka.model.storage.JbodStorage;
-import io.strimzi.api.kafka.model.storage.PersistentClaimStorage;
-import io.strimzi.api.kafka.model.storage.Storage;
 import io.strimzi.api.kafka.model.TlsSidecar;
 import io.strimzi.api.kafka.model.TlsSidecarLogLevel;
-import io.strimzi.api.kafka.model.template.DeploymentTemplate;
-import io.strimzi.api.kafka.model.template.InternalServiceTemplate;
-import io.strimzi.api.kafka.model.template.PodDisruptionBudgetTemplate;
-import io.strimzi.api.kafka.model.template.PodTemplate;
+import io.strimzi.api.kafka.model.storage.Storage;
 import io.strimzi.certs.CertAndKey;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -65,7 +55,7 @@ public class ModelUtils {
     private ModelUtils() {}
 
     protected static final ReconciliationLogger LOGGER = ReconciliationLogger.create(ModelUtils.class.getName());
-    public static final String TLS_SIDECAR_LOG_LEVEL = "TLS_SIDECAR_LOG_LEVEL";
+    protected static final String TLS_SIDECAR_LOG_LEVEL = "TLS_SIDECAR_LOG_LEVEL";
 
     /**
      * @param certificateAuthority The CA configuration.
@@ -107,11 +97,27 @@ public class ModelUtils {
     }
 
     static EnvVar tlsSidecarLogEnvVar(TlsSidecar tlsSidecar) {
-        return AbstractModel.buildEnvVar(TLS_SIDECAR_LOG_LEVEL,
+        return ContainerUtils.createEnvVar(TLS_SIDECAR_LOG_LEVEL,
                 (tlsSidecar != null && tlsSidecar.getLogLevel() != null ?
                         tlsSidecar.getLogLevel() : TlsSidecarLogLevel.NOTICE).toValue());
     }
 
+    /**
+     * Builds a certificate secret for the different Strimzi components (TO, UO, KE, ...)
+     *
+     * @param reconciliation                        Reconciliation marker
+     * @param clusterCa                             The Cluster CA
+     * @param secret                                Kubernetes Secret
+     * @param namespace                             Namespace
+     * @param secretName                            Name of the Kubernetes secret
+     * @param commonName                            Common Name of the certificate
+     * @param keyCertName                           Key under which the certificate will be stored in the new Secret
+     * @param labels                                Labels
+     * @param ownerReference                        Owner reference
+     * @param isMaintenanceTimeWindowsSatisfied     Flag whether we are inside a maintenance window or not
+     *
+     * @return  Newly built Secret
+     */
     public static Secret buildSecret(Reconciliation reconciliation, ClusterCa clusterCa, Secret secret, String namespace, String secretName,
                                      String commonName, String keyCertName, Labels labels, OwnerReference ownerReference, boolean isMaintenanceTimeWindowsSatisfied) {
         Map<String, String> data = new HashMap<>(4);
@@ -176,6 +182,19 @@ public class ModelUtils {
                 Collections.singletonMap(clusterCa.caCertGenerationAnnotation(), String.valueOf(clusterCa.certGeneration())), emptyMap());
     }
 
+    /**
+     * Creates Secret
+     *
+     * @param name                  Name of the Secret
+     * @param namespace             Namespace of the Secret
+     * @param labels                Labels
+     * @param ownerReference        Owner reference
+     * @param data                  Data which should be stored in the Secret
+     * @param customAnnotations     Custom annotations
+     * @param customLabels          Custom Labels
+     *
+     * @return  Created Kubernetes Secret
+     */
     public static Secret createSecret(String name, String namespace, Labels labels, OwnerReference ownerReference,
                                       Map<String, String> data, Map<String, String> customAnnotations, Map<String, String> customLabels) {
         if (ownerReference == null) {
@@ -205,129 +224,12 @@ public class ModelUtils {
     }
 
     /**
-     * Parses the values from the PodDisruptionBudgetTemplate in CRD model into the component model
+     * Decodes Storage configuration from JSON into Java object
      *
-     * @param model AbstractModel class where the values from the PodDisruptionBudgetTemplate should be set
-     * @param pdb PodDisruptionBudgetTemplate with the values form the CRD
-     */
-    public static void parsePodDisruptionBudgetTemplate(AbstractModel model, PodDisruptionBudgetTemplate pdb)   {
-        if (pdb != null)  {
-            if (pdb.getMetadata() != null) {
-                model.templatePodDisruptionBudgetLabels = pdb.getMetadata().getLabels();
-                model.templatePodDisruptionBudgetAnnotations = pdb.getMetadata().getAnnotations();
-            }
-
-            model.templatePodDisruptionBudgetMaxUnavailable = pdb.getMaxUnavailable();
-        }
-    }
-
-    /**
-     * Parses the values from the PodTemplate in CRD model into the component model
+     * @param json  Storage configuration in the JSON format
      *
-     * @param model AbstractModel class where the values from the PodTemplate should be set
-     * @param pod PodTemplate with the values form the CRD
+     * @return  Storage configuration
      */
-    public static void parsePodTemplate(AbstractModel model, PodTemplate pod)   {
-        if (pod != null)  {
-            if (pod.getMetadata() != null) {
-                model.templatePodLabels = pod.getMetadata().getLabels();
-                model.templatePodAnnotations = pod.getMetadata().getAnnotations();
-            }
-
-            if (pod.getAffinity() != null)  {
-                model.setUserAffinity(pod.getAffinity());
-            }
-
-            if (pod.getTolerations() != null)   {
-                model.setTolerations(removeEmptyValuesFromTolerations(pod.getTolerations()));
-            }
-
-            model.templateTerminationGracePeriodSeconds = pod.getTerminationGracePeriodSeconds();
-            model.templateImagePullSecrets = pod.getImagePullSecrets();
-            model.templateSecurityContext = pod.getSecurityContext();
-            model.templatePodPriorityClassName = pod.getPriorityClassName();
-            model.templatePodSchedulerName = pod.getSchedulerName();
-            model.templatePodHostAliases = pod.getHostAliases();
-            model.templatePodTopologySpreadConstraints = pod.getTopologySpreadConstraints();
-            model.templatePodEnableServiceLinks = pod.getEnableServiceLinks();
-            model.templateTmpDirSizeLimit = pod.getTmpDirSizeLimit();
-        }
-    }
-
-    /**
-     * Parses the values from the InternalServiceTemplate in CRD model into the component model
-     *
-     * @param model AbstractModel class where the values from the PodTemplate should be set
-     * @param service InternalServiceTemplate with the values form the CRD
-     */
-    public static void parseInternalServiceTemplate(AbstractModel model, InternalServiceTemplate service)   {
-        if (service != null)  {
-            if (service.getMetadata() != null) {
-                model.templateServiceLabels = service.getMetadata().getLabels();
-                model.templateServiceAnnotations = service.getMetadata().getAnnotations();
-            }
-
-            model.templateServiceIpFamilyPolicy = service.getIpFamilyPolicy();
-            model.templateServiceIpFamilies = service.getIpFamilies();
-        }
-    }
-
-    /**
-     * Parses the values from the InternalServiceTemplate of a headless service in CRD model into the component model
-     *
-     * @param model AbstractModel class where the values from the PodTemplate should be set
-     * @param service InternalServiceTemplate with the values form the CRD
-     */
-    public static void parseInternalHeadlessServiceTemplate(AbstractModel model, InternalServiceTemplate service)   {
-        if (service != null)  {
-            if (service.getMetadata() != null) {
-                model.templateHeadlessServiceLabels = service.getMetadata().getLabels();
-                model.templateHeadlessServiceAnnotations = service.getMetadata().getAnnotations();
-            }
-
-            model.templateHeadlessServiceIpFamilyPolicy = service.getIpFamilyPolicy();
-            model.templateHeadlessServiceIpFamilies = service.getIpFamilies();
-        }
-    }
-
-    /**
-     * Parses the values from the DeploymentTemplate in CRD model into the component model
-     *
-     * @param model AbstractModel class where the values from the DeploymentTemplate should be set
-     * @param template DeploymentTemplate with the values form the CRD
-     */
-    public static void parseDeploymentTemplate(AbstractModel model, DeploymentTemplate template)   {
-        if (template != null) {
-            if (template.getMetadata() != null) {
-                model.templateDeploymentLabels = template.getMetadata().getLabels();
-                model.templateDeploymentAnnotations = template.getMetadata().getAnnotations();
-            }
-
-            if (template.getDeploymentStrategy() != null)   {
-                model.templateDeploymentStrategy = template.getDeploymentStrategy();
-            } else {
-                model.templateDeploymentStrategy = io.strimzi.api.kafka.model.template.DeploymentStrategy.ROLLING_UPDATE;
-            }
-        }
-    }
-
-    /**
-     * Returns whether the given {@code Storage} instance is a persistent claim one or
-     * a JBOD containing at least one persistent volume.
-     *
-     * @param storage the Storage instance to check
-     * @return Whether the give Storage contains any persistent storage.
-     */
-    public static boolean containsPersistentStorage(Storage storage) {
-        boolean isPersistentClaimStorage = storage instanceof PersistentClaimStorage;
-
-        if (!isPersistentClaimStorage && storage instanceof JbodStorage) {
-            isPersistentClaimStorage |= ((JbodStorage) storage).getVolumes()
-                    .stream().anyMatch(volume -> volume instanceof PersistentClaimStorage);
-        }
-        return isPersistentClaimStorage;
-    }
-
     public static Storage decodeStorageFromJson(String json) {
         try {
             return new ObjectMapper().readValue(json, Storage.class);
@@ -336,6 +238,13 @@ public class ModelUtils {
         }
     }
 
+    /**
+     * Encodes storage configuration from Java object to JSON
+     *
+     * @param storage   Storage configuration
+     *
+     * @return  JSON String with the configuration
+     */
     public static String encodeStorageToJson(Storage storage) {
         try {
             return new ObjectMapper().writeValueAsString(storage);
@@ -390,20 +299,19 @@ public class ModelUtils {
         return false;
     }
 
+    /**
+     * Checks for the list passed to this method if it is null or not. And either returns the same list, or empty list
+     * if it is null.
+     *
+     * @param list  List which should be checked for null
+     *
+     * @param <T>   Type of the obejcts in the list
+     *
+     * @return  The original list of empty list if it as null.
+     */
     public static <T> List<T> asListOrEmptyList(List<T> list) {
         return Optional.ofNullable(list)
                 .orElse(Collections.emptyList());
-    }
-
-    private static String getJavaSystemPropertiesToString(List<SystemProperty> javaSystemProperties) {
-        if (javaSystemProperties == null) {
-            return null;
-        }
-        List<String> javaSystemPropertiesList = new ArrayList<>(javaSystemProperties.size());
-        for (SystemProperty property: javaSystemProperties) {
-            javaSystemPropertiesList.add("-D" + property.getName() + "=" + property.getValue());
-        }
-        return String.join(" ", javaSystemPropertiesList);
     }
 
     /**
@@ -415,9 +323,7 @@ public class ModelUtils {
     public static List<String> getLinesWithoutCommentsAndEmptyLines(String config) {
         List<String> validLines = new ArrayList<>();
         if (config != null) {
-            List<String> allLines = Arrays.asList(config.split("\\r?\\n"));
-
-            for (String line : allLines) {
+            for (String line : config.split("\\r?\\n")) {
                 if (!line.isEmpty() && !line.matches("\\s*\\#.*")) {
                     validLines.add(line);
                 }
@@ -427,179 +333,7 @@ public class ModelUtils {
     }
 
     /**
-     * Get the set of JVM options, bringing the Java system properties as well, and fill corresponding Strimzi environment variables
-     * in order to pass them to the running application on the command line
-     *
-     * @param envVars environment variables list to put the JVM options and Java system properties
-     * @param jvmOptions JVM options
-     */
-    public static void javaOptions(List<EnvVar> envVars, JvmOptions jvmOptions) {
-        StringBuilder strimziJavaOpts = new StringBuilder();
-        String xms = jvmOptions != null ? jvmOptions.getXms() : null;
-        if (xms != null) {
-            strimziJavaOpts.append("-Xms").append(xms);
-        }
-
-        String xmx = jvmOptions != null ? jvmOptions.getXmx() : null;
-        if (xmx != null) {
-            strimziJavaOpts.append(" -Xmx").append(xmx);
-        }
-
-        Map<String, String> xx = jvmOptions != null ? jvmOptions.getXx() : null;
-        if (xx != null) {
-            xx.forEach((k, v) -> {
-                strimziJavaOpts.append(' ').append("-XX:");
-
-                if ("true".equalsIgnoreCase(v))   {
-                    strimziJavaOpts.append("+").append(k);
-                } else if ("false".equalsIgnoreCase(v)) {
-                    strimziJavaOpts.append("-").append(k);
-                } else  {
-                    strimziJavaOpts.append(k).append("=").append(v);
-                }
-            });
-        }
-
-        String optsTrim = strimziJavaOpts.toString().trim();
-        if (!optsTrim.isEmpty()) {
-            envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_STRIMZI_JAVA_OPTS, optsTrim));
-        }
-
-        List<SystemProperty> javaSystemProperties = jvmOptions != null ? jvmOptions.getJavaSystemProperties() : null;
-        if (javaSystemProperties != null) {
-            String propsTrim = ModelUtils.getJavaSystemPropertiesToString(javaSystemProperties).trim();
-            if (!propsTrim.isEmpty()) {
-                envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_STRIMZI_JAVA_SYSTEM_PROPERTIES, propsTrim));
-            }
-        }
-    }
-
-    /**
-     * Adds the STRIMZI_JAVA_SYSTEM_PROPERTIES variable to the EnvVar list if any system properties were specified
-     * through the provided JVM options
-     *
-     * @param envVars list of the Environment Variables to add to
-     * @param jvmOptions JVM options
-     */
-    public static void jvmSystemProperties(List<EnvVar> envVars, JvmOptions jvmOptions) {
-        if (jvmOptions != null) {
-            String jvmSystemPropertiesString = ModelUtils.getJavaSystemPropertiesToString(jvmOptions.getJavaSystemProperties());
-            if (jvmSystemPropertiesString != null && !jvmSystemPropertiesString.isEmpty()) {
-                envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_STRIMZI_JAVA_SYSTEM_PROPERTIES, jvmSystemPropertiesString));
-            }
-        }
-    }
-
-    /**
-     * Adds the KAFKA_JVM_PERFORMANCE_OPTS variable to the EnvVar list if any performance related options were specified
-     * through the provided JVM options
-     *
-     * @param envVars list of the Environment Variables to add to
-     * @param jvmOptions JVM options
-     */
-    public static void jvmPerformanceOptions(List<EnvVar> envVars, JvmOptions jvmOptions) {
-        StringBuilder jvmPerformanceOpts = new StringBuilder();
-
-        Map<String, String> xx = jvmOptions != null ? jvmOptions.getXx() : null;
-        if (xx != null) {
-            xx.forEach((k, v) -> {
-                jvmPerformanceOpts.append(' ').append("-XX:");
-
-                if ("true".equalsIgnoreCase(v))   {
-                    jvmPerformanceOpts.append("+").append(k);
-                } else if ("false".equalsIgnoreCase(v)) {
-                    jvmPerformanceOpts.append("-").append(k);
-                } else  {
-                    jvmPerformanceOpts.append(k).append("=").append(v);
-                }
-            });
-        }
-
-        String jvmPerformanceOptsString = jvmPerformanceOpts.toString().trim();
-        if (!jvmPerformanceOptsString.isEmpty()) {
-            envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_KAFKA_JVM_PERFORMANCE_OPTS, jvmPerformanceOptsString));
-        }
-    }
-
-    /**
-     * Adds KAFKA_HEAP_OPTS variable to the EnvVar list if any heap related options were specified through the provided JVM options
-     * If Xmx Java Options are not set STRIMZI_DYNAMIC_HEAP_PERCENTAGE and STRIMZI_DYNAMIC_HEAP_MAX may also be set by using the ResourceRequirements
-     *
-     * @param envVars list of the Environment Variables to add to
-     * @param dynamicHeapPercentage value to set for the STRIMZI_DYNAMIC_HEAP_PERCENTAGE
-     * @param dynamicHeapMaxBytes value to set for the STRIMZI_DYNAMIC_HEAP_MAX
-     * @param jvmOptions JVM options
-     * @param resources the resource requirements
-     */
-    public static void heapOptions(List<EnvVar> envVars, int dynamicHeapPercentage, long dynamicHeapMaxBytes, JvmOptions jvmOptions, ResourceRequirements resources) {
-        if (dynamicHeapPercentage <= 0 || dynamicHeapPercentage > 100)  {
-            throw new RuntimeException("The Heap percentage " + dynamicHeapPercentage + " is invalid. It has to be >0 and <= 100.");
-        }
-
-        StringBuilder kafkaHeapOpts = new StringBuilder();
-
-        String xms = jvmOptions != null ? jvmOptions.getXms() : null;
-        if (xms != null) {
-            kafkaHeapOpts.append("-Xms")
-                    .append(xms);
-        }
-
-        String xmx = jvmOptions != null ? jvmOptions.getXmx() : null;
-        if (xmx != null) {
-            // Honour user provided explicit max heap
-            kafkaHeapOpts.append(' ').append("-Xmx").append(xmx);
-        } else {
-            // Get the resources => if requests are set, take request. If requests are not set, try limits
-            Quantity configuredMemory = null;
-            if (resources != null)  {
-                if (resources.getRequests() != null && resources.getRequests().get("memory") != null)    {
-                    configuredMemory = resources.getRequests().get("memory");
-                } else if (resources.getLimits() != null && resources.getLimits().get("memory") != null)   {
-                    configuredMemory = resources.getLimits().get("memory");
-                }
-            }
-
-            if (configuredMemory != null) {
-                // Delegate to the container to figure out only when CGroup memory limits are defined to prevent allocating
-                // too much memory on the kubelet.
-
-                envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_DYNAMIC_HEAP_PERCENTAGE, Integer.toString(dynamicHeapPercentage)));
-
-                if (dynamicHeapMaxBytes > 0) {
-                    envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_DYNAMIC_HEAP_MAX, Long.toString(dynamicHeapMaxBytes)));
-                }
-            } else if (xms == null) {
-                // When no memory limit, `Xms`, and `Xmx` are defined then set a default `Xms` and
-                // leave `Xmx` undefined.
-                kafkaHeapOpts.append("-Xms").append(AbstractModel.DEFAULT_JVM_XMS);
-            }
-        }
-
-        String kafkaHeapOptsString = kafkaHeapOpts.toString().trim();
-        if (!kafkaHeapOptsString.isEmpty()) {
-            envVars.add(AbstractModel.buildEnvVar(AbstractModel.ENV_VAR_KAFKA_HEAP_OPTS, kafkaHeapOptsString));
-        }
-    }
-
-    /**
-     * If the toleration.value is an empty string, set it to null. That solves an issue when built STS contains a filed
-     * with an empty property value. K8s is removing properties like this and thus we cannot fetch an equal STS which was
-     * created with (some) empty value.
-     *
-     * @param tolerations   Tolerations list to check whether toleration.value is an empty string and eventually replace it by null
-     *
-     * @return              List of tolerations with fixed empty strings
-     */
-    public static List<Toleration> removeEmptyValuesFromTolerations(List<Toleration> tolerations) {
-        if (tolerations != null) {
-            tolerations.stream().filter(toleration -> toleration.getValue() != null && toleration.getValue().isEmpty()).forEach(emptyValTol -> emptyValTol.setValue(null));
-            return tolerations;
-        } else {
-            return null;
-        }
-    }
-
-    /**
+     * Adds user-configured affinity to the AffinityBuilder
      *
      * @param builder the builder which is used to populate the node affinity
      * @param userAffinity the userAffinity which is defined by the user
@@ -650,61 +384,22 @@ public class ModelUtils {
     }
 
     /**
-     * Decides whether the Cluster Operator needs namespaceSelector to be configured in the network policies in order
-     * to talk with the operands. This follows the following rules:
-     *     - If it runs in the same namespace as the operand, do not set namespace selector
-     *     - If it runs in a different namespace, but user provided selector labels, use the labels
-     *     - If it runs in a different namespace, and user didn't provided selector labels, open it to COs in all namespaces
-     *
-     * @param peer                      Network policy peer where the namespace selector should be set
-     * @param operandNamespace          Namespace of the operand
-     * @param operatorNamespace         Namespace of the Strimzi CO
-     * @param operatorNamespaceLabels   Namespace labels provided by the user
-     */
-    public static void setClusterOperatorNetworkPolicyNamespaceSelector(NetworkPolicyPeer peer, String operandNamespace, String operatorNamespace, Labels operatorNamespaceLabels)   {
-        if (!operandNamespace.equals(operatorNamespace)) {
-            // If CO and the operand do not run in the same namespace, we need to handle cross namespace access
-
-            if (operatorNamespaceLabels != null && !operatorNamespaceLabels.toMap().isEmpty())    {
-                // If user specified the namespace labels, we can use them to make the network policy as tight as possible
-                LabelSelector nsLabelSelector = new LabelSelector();
-                nsLabelSelector.setMatchLabels(operatorNamespaceLabels.toMap());
-                peer.setNamespaceSelector(nsLabelSelector);
-            } else {
-                // If no namespace labels were specified, we open the network policy to COs in all namespaces
-                peer.setNamespaceSelector(new LabelSelector());
-            }
-        }
-    }
-
-    /**
-     * Checks if the section of the custom resource has any metrics configuration and sets it in the AbstractModel.
-     *
-     * @param model                     The cluster model where the metrics will be configured
-     * @param resourceWithMetrics       The section of the resource with metrics configuration
-     */
-    public static void parseMetrics(AbstractModel model, HasConfigurableMetrics resourceWithMetrics)   {
-        if (resourceWithMetrics.getMetricsConfig() != null)    {
-            model.setMetricsEnabled(true);
-            model.setMetricsConfigInCm(resourceWithMetrics.getMetricsConfig());
-        }
-    }
-
-    /**
      * Creates the OwnerReference based on the resource passed as parameter
      *
-     * @param owner     The resource which should be the owner
+     * @param owner         The resource which should be the owner
+     * @param isController  Indicates whether the owner acts also as the controller. This value is used in the
+     *                      controller flag which is part of the OwnerReference object.
      *
      * @return          The new OwnerReference
      */
-    public static OwnerReference createOwnerReference(HasMetadata owner)   {
+    public static OwnerReference createOwnerReference(HasMetadata owner, boolean isController)   {
         return new OwnerReferenceBuilder()
                 .withApiVersion(owner.getApiVersion())
                 .withKind(owner.getKind())
                 .withName(owner.getMetadata().getName())
                 .withUid(owner.getMetadata().getUid())
                 .withBlockOwnerDeletion(false)
-                .withController(false)
+                .withController(isController)
                 .build();
     }
 
@@ -741,13 +436,94 @@ public class ModelUtils {
     }
 
     /**
-     * Returns the id of a pod given the pod name
+     * Extract the CA key generation from the CA
      *
-     * @param podName   Name of pod
-     *
-     * @return          Id of the pod
+     * @param ca CA from which the generation should be extracted
+     * @return CA key generation or the initial generation if no generation is set
      */
-    public static int idOfPod(String podName)  {
-        return Integer.parseInt(podName.substring(podName.lastIndexOf("-") + 1));
+    public static int caKeyGeneration(Ca ca) {
+        return Annotations.intAnnotation(ca.caKeySecret(), Ca.ANNO_STRIMZI_IO_CA_KEY_GENERATION, Ca.INIT_GENERATION);
+    }
+
+    /**
+     * Generates all possible DNS names for a Kubernetes service:
+     *     - service-name
+     *     - service-name.namespace
+     *     - service-name.namespace.svc
+     *     - service-name.namespace.svc.dns.suffix
+     *
+     * @param namespace     Namespace of the service
+     * @param serviceName   Name of the service
+     *
+     * @return  List with all possible DNS names
+     */
+    public static List<String> generateAllServiceDnsNames(String namespace, String serviceName)    {
+        DnsNameGenerator kafkaDnsGenerator = DnsNameGenerator.of(namespace, serviceName);
+
+        List<String> dnsNames = new ArrayList<>(4);
+
+        dnsNames.add(serviceName);
+        dnsNames.add(String.format("%s.%s", serviceName, namespace));
+        dnsNames.add(kafkaDnsGenerator.serviceDnsNameWithoutClusterDomain());
+        dnsNames.add(kafkaDnsGenerator.serviceDnsName());
+
+        return dnsNames;
+    }
+
+    /**
+     * Validate cpu and memory resources.
+     * Early resources validation avoids triggering any pod operation with invalid configuration.
+     * 
+     * For both cpu and memory, this method checks that request is greater than zero, 
+     * limit is greater than zero and limit is greater than or equal to the request.
+     * 
+     * @param resources Resources configuration.
+     * @param path Resources path.
+     */
+    public static void validateComputeResources(ResourceRequirements resources, String path) {
+        List<String> errors = ModelUtils.validateComputeResources(resources, "cpu", path);
+        errors.addAll(ModelUtils.validateComputeResources(resources, "memory", path));
+        if (!errors.isEmpty()) {
+            throw new InvalidResourceException(errors.toString());
+        }
+    }
+
+    /**
+     * Validate compute resources.
+     * 
+     * This method checks that request is greater than zero, limit is greater than zero 
+     * and limit is greater than or equal to the request.
+     * 
+     * @param resources Resources configuration.
+     * @param type Resources type.
+     * @param path Resources path.
+     * 
+     * @return Error set.
+     */
+    private static List<String> validateComputeResources(ResourceRequirements resources, String type, String path) {
+        List<String> errors = new ArrayList<>();
+        if (resources != null) {
+            if (resources.getRequests() != null && resources.getRequests().get(type) != null) {
+                Quantity request = resources.getRequests().get(type);
+                if (request != null && request.getNumericalAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                    errors.add(String.format("%s %s request must be > zero", path, type).trim());
+                }
+            }
+            if (resources.getLimits() != null && resources.getLimits().get(type) != null) {
+                Quantity limit = resources.getLimits().get(type);
+                if (limit.getNumericalAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                    errors.add(String.format("%s %s limit must be > zero", path, type).trim());
+                }
+            }
+            if (resources.getRequests() != null && resources.getRequests().get(type) != null
+                    && resources.getLimits() != null && resources.getLimits().get(type) != null) {
+                Quantity limit = resources.getLimits().get(type);
+                Quantity request = resources.getRequests().get(type);
+                if (request != null && request.getNumericalAmount().compareTo(limit.getNumericalAmount()) > 0) {
+                    errors.add(String.format("%s %s request must be <= limit", path, type).trim());
+                }
+            }
+        }
+        return errors;
     }
 }

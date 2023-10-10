@@ -14,6 +14,7 @@ import io.strimzi.kafka.oauth.jsonpath.JsonPathFilterQuery;
 import io.strimzi.kafka.oauth.jsonpath.JsonPathQuery;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
+import io.strimzi.operator.common.model.InvalidResourceException;
 
 import java.util.HashSet;
 import java.util.List;
@@ -29,18 +30,18 @@ import static io.strimzi.operator.cluster.model.ListenersUtils.isListenerWithOAu
 public class ListenersValidator {
     protected static final ReconciliationLogger LOGGER = ReconciliationLogger.create(ListenersValidator.class.getName());
     private final static Pattern LISTENER_NAME_PATTERN = Pattern.compile(GenericKafkaListener.LISTENER_NAME_REGEX);
-    public final static List<Integer> FORBIDDEN_PORTS = List.of(9404, 9999);
-    public final static int LOWEST_ALLOWED_PORT_NUMBER = 9092;
+    private final static List<Integer> FORBIDDEN_PORTS = List.of(9404, 9999);
+    private final static int LOWEST_ALLOWED_PORT_NUMBER = 9092;
 
     /**
      * Validated the listener configuration. If the configuration is not valid, InvalidResourceException will be thrown.
      *
-     * @param reconciliation The reconciliation
-     * @param replicas   Number of replicas (required for Ingress validation)
-     * @param listeners  Listeners which should be validated
+     * @param reconciliation    The reconciliation
+     * @param brokerNodes       Broker nodes which are part of this Kafka cluster
+     * @param listeners         Listeners which should be validated
      */
-    public static void validate(Reconciliation reconciliation, int replicas, List<GenericKafkaListener> listeners) throws InvalidResourceException {
-        Set<String> errors = validateAndGetErrorMessages(replicas, listeners);
+    public static void validate(Reconciliation reconciliation, Set<NodeRef> brokerNodes, List<GenericKafkaListener> listeners) throws InvalidResourceException {
+        Set<String> errors = validateAndGetErrorMessages(brokerNodes, listeners);
 
         if (!errors.isEmpty())  {
             LOGGER.errorCr(reconciliation, "Listener configuration is not valid: {}", errors);
@@ -48,7 +49,7 @@ public class ListenersValidator {
         }
     }
 
-    /*test*/ static Set<String> validateAndGetErrorMessages(int replicas, List<GenericKafkaListener> listeners)    {
+    /*test*/ static Set<String> validateAndGetErrorMessages(Set<NodeRef> brokerNodes, List<GenericKafkaListener> listeners)    {
         Set<String> errors = new HashSet<>(0);
         List<Integer> ports = getPorts(listeners);
         List<String> names = getNames(listeners);
@@ -57,7 +58,7 @@ public class ListenersValidator {
             errors.add("every listener needs to have a unique name");
         }
 
-        List<String> invalidNames = names.stream().filter(name -> !LISTENER_NAME_PATTERN.matcher(name).matches()).collect(Collectors.toList());
+        List<String> invalidNames = names.stream().filter(name -> !LISTENER_NAME_PATTERN.matcher(name).matches()).toList();
         if (!invalidNames.isEmpty())    {
             errors.add("listener names " + invalidNames + " are invalid and do not match the pattern " + GenericKafkaListener.LISTENER_NAME_REGEX);
         }
@@ -76,7 +77,7 @@ public class ListenersValidator {
                 validateServiceDnsDomain(errors, listener);
                 validateIpFamilyPolicy(errors, listener);
                 validateIpFamilies(errors, listener);
-                validateIngressClass(errors, listener);
+                validateControllerClass(errors, listener);
                 validateExternalTrafficPolicy(errors, listener);
                 validateLoadBalancerSourceRanges(errors, listener);
                 validateFinalizers(errors, listener);
@@ -106,7 +107,7 @@ public class ListenersValidator {
             }
 
             if (KafkaListenerType.INGRESS.equals(listener.getType()))    {
-                validateIngress(errors, replicas, listener);
+                validateIngress(errors, brokerNodes, listener);
             }
         }
 
@@ -154,11 +155,11 @@ public class ListenersValidator {
     /**
      * Validates that Ingress type listener has the right host configurations
      *
-     * @param errors    List where any found errors will be added
-     * @param replicas  Number of Kafka replicas
-     * @param listener  Listener which needs to be validated
+     * @param errors        List where any found errors will be added
+     * @param brokerNodes   Broker nodes which are part of this Kafka cluster
+     * @param listener      Listener which needs to be validated
      */
-    private static void validateIngress(Set<String> errors, int replicas, GenericKafkaListener listener) {
+    private static void validateIngress(Set<String> errors, Set<NodeRef> brokerNodes, GenericKafkaListener listener) {
         if (listener.getConfiguration() != null)    {
             GenericKafkaListenerConfiguration conf = listener.getConfiguration();
 
@@ -168,12 +169,11 @@ public class ListenersValidator {
             }
 
             if (conf.getBrokers() != null) {
-                for (int i = 0; i < replicas; i++)  {
-                    final int id = i;
-                    GenericKafkaListenerConfigurationBroker broker = conf.getBrokers().stream().filter(b -> b.getBroker() == id).findFirst().orElse(null);
+                for (NodeRef node : brokerNodes)    {
+                    GenericKafkaListenerConfigurationBroker broker = conf.getBrokers().stream().filter(b -> b.getBroker() == node.nodeId()).findFirst().orElse(null);
 
                     if (broker == null || broker.getHost() == null) {
-                        errors.add("listener " + listener.getName() + " is missing a broker host name for broker with ID " + i + " which is required for Ingress based listeners");
+                        errors.add("listener " + listener.getName() + " is missing a broker host name for broker with ID " + node.nodeId() + " which is required for Ingress based listeners");
                     }
                 }
             } else {
@@ -193,9 +193,9 @@ public class ListenersValidator {
      * @param listener  Listener which needs to be validated
      */
     private static void validateServiceDnsDomain(Set<String> errors, GenericKafkaListener listener) {
-        if (KafkaListenerType.INTERNAL != listener.getType()
+        if (!(KafkaListenerType.INTERNAL.equals(listener.getType()) || KafkaListenerType.CLUSTER_IP.equals(listener.getType()))
                 && listener.getConfiguration().getUseServiceDnsDomain() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure useServiceDnsDomain because it is not internal listener");
+            errors.add("listener " + listener.getName() + " cannot configure useServiceDnsDomain because it is not internal or cluster-ip listener");
         }
     }
 
@@ -222,7 +222,7 @@ public class ListenersValidator {
     private static void validateIpFamilyPolicy(Set<String> errors, GenericKafkaListener listener) {
         if (KafkaListenerType.INTERNAL == listener.getType()
                 && listener.getConfiguration().getIpFamilyPolicy() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure ipFamilyPolicy because it is not internal listener");
+            errors.add("listener " + listener.getName() + " cannot configure ipFamilyPolicy because it is internal listener");
         }
     }
 
@@ -235,20 +235,20 @@ public class ListenersValidator {
     private static void validateIpFamilies(Set<String> errors, GenericKafkaListener listener) {
         if (KafkaListenerType.INTERNAL == listener.getType()
                 && listener.getConfiguration().getIpFamilies() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure ipFamilies because it is not internal listener");
+            errors.add("listener " + listener.getName() + " cannot configure ipFamilies because it is internal listener");
         }
     }
 
     /**
-     * Validates that ingressClass is used only with Ingress type listener
+     * Validates that controllerClass is used only with Ingress or LoadBalancer type listener
      *
      * @param errors    List where any found errors will be added
      * @param listener  Listener which needs to be validated
      */
-    private static void validateIngressClass(Set<String> errors, GenericKafkaListener listener) {
-        if (!KafkaListenerType.INGRESS.equals(listener.getType())
-                && listener.getConfiguration().getIngressClass() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure ingressClass because it is not Ingress based listener");
+    private static void validateControllerClass(Set<String> errors, GenericKafkaListener listener) {
+        if (!(KafkaListenerType.INGRESS.equals(listener.getType()) || KafkaListenerType.LOADBALANCER.equals(listener.getType()))
+                && listener.getConfiguration().getControllerClass() != null)    {
+            errors.add("listener " + listener.getName() + " cannot configure class because it is not an Ingress or LoadBalancer based listener");
         }
     }
 
@@ -315,7 +315,7 @@ public class ListenersValidator {
     private static void validateBootstrapHost(Set<String> errors, GenericKafkaListener listener) {
         if ((!KafkaListenerType.ROUTE.equals(listener.getType()) && !KafkaListenerType.INGRESS.equals(listener.getType()))
                 && listener.getConfiguration().getBootstrap().getHost() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure bootstrap.host because it is not Route ot Ingress based listener");
+            errors.add("listener " + listener.getName() + " cannot configure bootstrap.host because it is not Route or Ingress based listener");
         }
     }
 
@@ -357,15 +357,16 @@ public class ListenersValidator {
         if (!KafkaListenerType.LOADBALANCER.equals(listener.getType())
                 && !KafkaListenerType.NODEPORT.equals(listener.getType())
                 && !KafkaListenerType.ROUTE.equals(listener.getType())
-                && !KafkaListenerType.INGRESS.equals(listener.getType())) {
+                && !KafkaListenerType.INGRESS.equals(listener.getType())
+                && !KafkaListenerType.CLUSTER_IP.equals(listener.getType())) {
             if (listener.getConfiguration().getBootstrap().getLabels() != null
                     && !listener.getConfiguration().getBootstrap().getLabels().isEmpty()) {
-                errors.add("listener " + listener.getName() + " cannot configure bootstrap.labels because it is not LoadBalancer, NodePort, Route, or Ingress based listener");
+                errors.add("listener " + listener.getName() + " cannot configure bootstrap.labels because it is not LoadBalancer, NodePort, Route, Ingress or ClusterIP based listener");
             }
 
             if (listener.getConfiguration().getBootstrap().getAnnotations() != null
                     && !listener.getConfiguration().getBootstrap().getAnnotations().isEmpty()) {
-                errors.add("listener " + listener.getName() + " cannot configure bootstrap.annotations because it is not LoadBalancer, NodePort, Route, or Ingress based listener");
+                errors.add("listener " + listener.getName() + " cannot configure bootstrap.annotations because it is not LoadBalancer, NodePort, Route, Ingress or ClusterIP based listener");
             }
         }
     }
@@ -380,7 +381,7 @@ public class ListenersValidator {
     private static void validateBrokerHost(Set<String> errors, GenericKafkaListener listener, GenericKafkaListenerConfigurationBroker broker) {
         if ((!KafkaListenerType.ROUTE.equals(listener.getType()) && !KafkaListenerType.INGRESS.equals(listener.getType()))
                 && broker.getHost() != null)    {
-            errors.add("listener " + listener.getName() + " cannot configure brokers[].host because it is not Route ot Ingress based listener");
+            errors.add("listener " + listener.getName() + " cannot configure brokers[].host because it is not Route or Ingress based listener");
         }
     }
 
@@ -425,15 +426,16 @@ public class ListenersValidator {
         if (!KafkaListenerType.LOADBALANCER.equals(listener.getType())
                 && !KafkaListenerType.NODEPORT.equals(listener.getType())
                 && !KafkaListenerType.ROUTE.equals(listener.getType())
-                && !KafkaListenerType.INGRESS.equals(listener.getType()))  {
+                && !KafkaListenerType.INGRESS.equals(listener.getType())
+                && !KafkaListenerType.CLUSTER_IP.equals(listener.getType()))  {
             if (broker.getLabels() != null
                     && !broker.getLabels().isEmpty()) {
-                errors.add("listener " + listener.getName() + " cannot configure brokers[].labels because it is not LoadBalancer, NodePort, Route, or Ingress based listener");
+                errors.add("listener " + listener.getName() + " cannot configure brokers[].labels because it is not LoadBalancer, NodePort, Route, Ingress or ClusterIP based listener");
             }
 
             if (broker.getAnnotations() != null
                     && !broker.getAnnotations().isEmpty()) {
-                errors.add("listener " + listener.getName() + " cannot configure brokers[].annotations because it is not LoadBalancer, NodePort, Route, or Ingress based listener");
+                errors.add("listener " + listener.getName() + " cannot configure brokers[].annotations because it is not LoadBalancer, NodePort, Route, Ingress or ClusterIP based listener");
             }
         }
     }

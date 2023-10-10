@@ -1,4 +1,4 @@
-Configures access control rules for a `KafkaUser` when brokers are using the `AclAuthorizer`.
+Configures access control rules for a `KafkaUser` when brokers are using `simple` authorization.
 
 .Example `KafkaUser` configuration with authorization
 [source,yaml,subs="attributes+"]
@@ -18,22 +18,20 @@ spec:
           type: topic
           name: my-topic
           patternType: literal
-        operation: Read
-      - resource:
-          type: topic
-          name: my-topic
-          patternType: literal
-        operation: Describe
+        operations:
+          - Read
+          - Describe
       - resource:
           type: group
           name: my-group
           patternType: prefix
-        operation: Read
+        operations:
+          - Read
 ----
 
 
 [id='property-acl-resource-{context}']
-=== `resource`
+= `resource`
 
 Use the `resource` property to specify the resource that the rule applies to.
 
@@ -63,21 +61,22 @@ When `patternType` is set as `literal`, you can set the name to `*` to indicate 
           type: topic
           name: "*"
           patternType: literal
-        operation: Read
+        operations:
+          - Read
 ----
 
 [id='property-acl-type-{context}']
-=== `type`
+= `type`
 
-The `type` of rule, which is to `allow` or `deny` (not currently supported) an operation.
+The `type` of rule, which is to `allow` or `deny` (not currently supported) an operations.
 
 The `type` field is optional.
 If `type` is unspecified, the ACL rule is treated as an `allow` rule.
 
 [id='property-acl-operation-{context}']
-=== `operation`
+= `operations`
 
-Specify an `operation` for the rule to allow or deny.
+Specify a list of `operations` for the rule to allow or deny.
 
 The following operations are supported:
 
@@ -95,10 +94,10 @@ The following operations are supported:
 
 Only certain operations work with each resource.
 
-For more details about `AclAuthorizer`, ACLs and supported combinations of resources and operations, see link:http://kafka.apache.org/documentation/#security_authz[Authorization and ACLs^].
+For more details about `simple` authorization, ACLs, and supported combinations of resources and operations, see link:http://kafka.apache.org/documentation/#security_authz[Authorization and ACLs^].
 
 [id='property-acl-host-{context}']
-=== `host`
+= `host`
 
 Use the `host` property to specify a remote host from which the rule is allowed or denied.
 

@@ -7,6 +7,7 @@ package io.strimzi.systemtest;
 import io.strimzi.test.TestUtils;
 
 import java.time.Duration;
+import java.util.Map;
 
 /**
  * Interface for keep global constants used across system tests.
@@ -66,6 +67,22 @@ public interface Constants {
     // sometimes each call `curl -X GET http://localhost:8083/connectors` could take in maximum 13s, and we do 50 calls; meaning (13s * 50)/60 ~= 11m
     long KAFKA_CONNECTOR_STABILITY_TIMEOUT = Duration.ofMinutes(12).toMillis();
 
+    // Jaeger
+    long JAEGER_DEPLOYMENT_TIMEOUT = Duration.ofMinutes(4).toMillis();
+    long JAEGER_DEPLOYMENT_POLL = Duration.ofMinutes(1).toMillis();
+
+    /**
+     * Constants for KafkaConnect EchoSink plugin
+      */
+    String ECHO_SINK_CONNECTOR_NAME = "echo-sink-connector";
+    String ECHO_SINK_CLASS_NAME = "cz.scholz.kafka.connect.echosink.EchoSinkConnector";
+    String ECHO_SINK_TGZ_URL = "https://github.com/scholzj/echo-sink/archive/1.5.0.tar.gz";
+    String ECHO_SINK_TGZ_CHECKSUM = "5d175575195c00cf7ba85f042c118a4c06ea0aa98202a3d610c5aefb6a28e86d6315f19b4b5edd6c343998325df871bd21232b6544429fccf45cef1f14715d35";
+    String ECHO_SINK_JAR_URL = "https://github.com/scholzj/echo-sink/releases/download/1.5.0/echo-sink-1.5.0.jar";
+    String ECHO_SINK_JAR_CHECKSUM = "87b6512e1c75efdb369a2d7107f40a39e91604eced90cdb8ed064f03c15c2d2a967c36dc7a4698e9910dfac6dd10fb25326b69c581ee0b168b8f786617b6e402";
+    String ECHO_SINK_FILE_NAME = "echo-sink-test.jar";
+    String ECHO_SINK_JAR_WRONG_CHECKSUM = "f1f167902325062efc8c755647bc1b782b2b067a87a6e507ff7a3f6205803220";
+
     /**
      * Scraper pod labels
      */
@@ -94,6 +111,11 @@ public interface Constants {
     String DRAIN_CLEANER_NAMESPACE = "strimzi-drain-cleaner";
 
     /**
+     * Deployment labels related constants
+     */
+    String APP_POD_LABEL = "app";
+
+    /**
      * Constants for specific ports
      */
     int COMPONENTS_METRICS_PORT = 9404;
@@ -107,6 +129,7 @@ public interface Constants {
     String DEPLOYMENT_TYPE = "deployment-type";
     String SERVICE = "Service";
     String CONFIG_MAP = "ConfigMap";
+    String LEASE = "Lease";
     String SERVICE_ACCOUNT = "ServiceAccount";
     String CLUSTER_ROLE = "ClusterRole";
     String CLUSTER_ROLE_BINDING = "ClusterRoleBinding";
@@ -123,9 +146,12 @@ public interface Constants {
     String NETWORK_POLICY = "NetworkPolicy";
     String JOB = "Job";
     String VALIDATION_WEBHOOK_CONFIG = "ValidatingWebhookConfiguration";
+    String REPLICA_SET = "ReplicaSet";
+    String SUBSCRIPTION = "Subscription";
+    String OPERATOR_GROUP = "OperatorGroup";
 
     /**
-     * Kafka Bridge JSON encoding with JSON embedded format
+     * KafkaBridge JSON encoding with JSON embedded format
      */
     String KAFKA_BRIDGE_JSON_JSON = "application/vnd.kafka.json.v2+json";
     String DEFAULT_SINK_FILE_PATH = "/tmp/test-file-sink.txt";
@@ -164,9 +190,10 @@ public interface Constants {
     /**
      * Feature gate related constants
      */
-    String USE_STRIMZI_POD_SET = "+UseStrimziPodSets";
-    String USE_STRIMZI_STATEFULSETS = "-UseStrimziPodSets";
     String USE_KRAFT_MODE = "+UseKRaft";
+    String DONT_USE_STABLE_CONNECT_IDENTITIES = "-StableConnectIdentities";
+    String USE_KAFKA_NODE_POOLS = "+KafkaNodePools";
+    String UNIDIRECTIONAL_TOPIC_OPERATOR = "+UnidirectionalTopicOperator";
 
     /**
      * Default value which allows execution of tests with any tags
@@ -199,6 +226,11 @@ public interface Constants {
     String SMOKE = "smoke";
 
     /**
+     * Tag for Kafka smoke tests
+     */
+    String KAFKA_SMOKE = "kafkasmoke";
+
+    /**
      * Tag for sanity tests
      */
     String SANITY = "sanity";
@@ -212,6 +244,11 @@ public interface Constants {
      * Tag for scalability tests
      */
     String SCALABILITY = "scalability";
+
+    /**
+     * Tag for tests containing scaling of particular component (scaling up and down)
+     */
+    String COMPONENT_SCALING = "componentscaling";
 
     /**
      * Tag for tests, which are working only on specific environment and we usually don't want to execute them on all environments.
@@ -304,7 +341,7 @@ public interface Constants {
     String METRICS = "metrics";
 
     /**
-     * Tag for tests where cruise control used
+     * Tag for tests where CruiseControl is used
      */
     String CRUISE_CONTROL = "cruisecontrol";
 
@@ -328,28 +365,28 @@ public interface Constants {
      */
     String OLM = "olm";
 
+    /**
+     * Tag for tests using Openshift Route
+     */
+    String ROUTE = "route";
+
+    /**
+     * Tag for tests, without ARM,AARCH64 support
+     */
+    String ARM64_UNSUPPORTED = "arm64unsupported";
+
     String ISOLATED_TEST = "isolatedtest";
     String PARALLEL_TEST = "paralleltest";
     /**
      * Tag for tests which executing in parallel namespaces
      */
     String PARALLEL_NAMESPACE = "parallelnamespace";
-    // label for test case used for parallel execution of test suites
-    String PARALLEL_SUITE = "parallelsuite";
-    // label for test case used for isolation of test suites
-    String ISOLATED_SUITE = "isolatedsuite";
-
-    /**
-     * Constants for filtering and matching our test suites names
-     */
-    String ISOLATED = "Isolated";
-    String ST = "ST";
 
     String TEST_CASE_NAME_LABEL = "test.case";
     String TEST_SUITE_NAME_LABEL = "test.suite";
 
     /**
-     * Cruise Control related parameters
+     * CruiseControl related parameters
      */
     String CRUISE_CONTROL_NAME = "Cruise Control";
     String CRUISE_CONTROL_CONTAINER_NAME = "cruise-control";
@@ -364,6 +401,7 @@ public interface Constants {
     String PLAIN_LISTENER_DEFAULT_NAME = "plain";
     String TLS_LISTENER_DEFAULT_NAME = "tls";
     String EXTERNAL_LISTENER_DEFAULT_NAME = "external";
+    String CLUSTER_IP_LISTENER_DEFAULT_NAME = "clusterip";
 
     /**
      * Loadbalancer finalizer config
@@ -371,8 +409,7 @@ public interface Constants {
     String LOAD_BALANCER_CLEANUP = "service.kubernetes.io/load-balancer-cleanup";
 
     // main namespace for Cluster Operator deployment
-    String INFRA_NAMESPACE = "infra-namespace";
-    String METRICS_SECOND_NAMESPACE = "second-metrics-cluster-test";
+    String CO_NAMESPACE = "co-namespace";
 
     /**
      * Auxiliary variables for storing data across our tests
@@ -380,12 +417,17 @@ public interface Constants {
     String NAMESPACE_KEY = "NAMESPACE_NAME";
     String PREPARE_OPERATOR_ENV_KEY = "PREPARE_OPERATOR_ENV";
 
+    // Count of test messages that needs to be sent during the test
+    int MESSAGE_COUNT = 100;
+
     /**
      * Auxiliary variable for cluster operator deployment
      */
     String WATCH_ALL_NAMESPACES = "*";
 
+    String TEST_NAME_KEY = "TEST_NAME";
     String CLUSTER_KEY = "CLUSTER_NAME";
+    String KAFKA_NODE_POOL_KEY = "KAFKA_NODE_POOL";
     String TARGET_CLUSTER_KEY = "TARGET_CLUSTER_NAME";
     String TOPIC_KEY = "TOPIC_NAME";
     String TARGET_TOPIC_KEY = "TARGET_TOPIC_NAME";
@@ -395,9 +437,50 @@ public interface Constants {
     String CONSUMER_KEY = "CONSUMER_NAME";
     String ADMIN_KEY = "ADMIN_NAME";
     String USER_NAME_KEY = "USER_NAME";
+    String KAFKA_USER_NAME_KEY = "KAFKA_USER_NAME";
+    String ENTITY_OPERATOR_NAME_KEY = "ENTITY_OPERATOR_NAME";
+    String KAFKA_STATEFULSET_NAME_KEY = "KAFKA_STATEFULSET_NAME";
+    String ZOOKEEPER_STATEFULSET_NAME_KEY = "ZOOKEEPER_STATEFULSET_NAME";
     String SCRAPER_POD_KEY = "SCRAPER_POD_NAME";
     String KAFKA_TRACING_CLIENT_KEY = "KAFKA_TRACING_CLIENT";
     String KAFKA_SELECTOR = "KAFKA_SELECTOR";
     String ZOOKEEPER_SELECTOR = "ZOOKEEPER_SELECTOR";
-    String ENTITY_OPERATOR_NAME = "ENTITY_OPERATOR_NAME";
+    String MESSAGE_COUNT_KEY = "MESSAGE_COUNT";
+    String TEST_EXECUTION_START_TIME_KEY = "TEST_EXECUTION_START_TIME";
+
+    /**
+     * Lease related resources - ClusterRole, Role, RoleBinding
+     */
+    String PATH_TO_LEASE_CLUSTER_ROLE = PATH_TO_PACKAGING_INSTALL_FILES + "/cluster-operator/022-ClusterRole-strimzi-cluster-operator-role.yaml";
+    // Path after change of ClusterRole -> Role in our SetupClusterOperator class
+    String PATH_TO_LEASE_ROLE = PATH_TO_PACKAGING_INSTALL_FILES + "/cluster-operator/022-Role-strimzi-cluster-operator-role.yaml";
+    String PATH_TO_LEASE_ROLE_BINDING = PATH_TO_PACKAGING_INSTALL_FILES + "/cluster-operator/022-RoleBinding-strimzi-cluster-operator.yaml";
+    Map<String, String> LEASE_FILES_AND_RESOURCES = Map.of(
+        CLUSTER_ROLE, PATH_TO_LEASE_CLUSTER_ROLE,
+        ROLE, PATH_TO_LEASE_ROLE,
+        ROLE_BINDING, PATH_TO_LEASE_ROLE_BINDING
+    );
+
+    /**
+     * Cluster Operator resources config
+     */
+    String CO_REQUESTS_MEMORY = "512Mi";
+    String CO_REQUESTS_CPU = "200m";
+    String CO_LIMITS_MEMORY = "512Mi";
+    String CO_LIMITS_CPU = "1000m";
+
+    /**
+     * Connect build image name
+     */
+    String ST_CONNECT_BUILD_IMAGE_NAME = "strimzi-sts-connect-build";
+
+    /**
+     * KafkaNodePools constants
+     */
+    String KAFKA_NODE_POOL_PREFIX = "kafka-pool-";
+
+    /**
+     * Persistent Volume related
+     */
+    String PVC_PHASE_BOUND = "Bound";
 }

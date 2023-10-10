@@ -25,14 +25,16 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({"type", "clientId", "tokenEndpointUri",
     "tlsTrustedCertificates", "disableTlsHostnameVerification",
-    "delegateToKafkaAcls", "grantsRefreshPeriodSeconds", "grantsRefreshPoolSize", "superUsers", "connectTimeoutSeconds", "readTimeoutSeconds"})
-@EqualsAndHashCode
+    "delegateToKafkaAcls", "grantsRefreshPeriodSeconds", "grantsRefreshPoolSize",
+    "grantsMaxIdleSeconds", "grantsGcPeriodSeconds", "grantsAlwaysLatest", "superUsers",
+    "connectTimeoutSeconds", "readTimeoutSeconds", "httpRetries", "enableMetrics"})
+@EqualsAndHashCode(callSuper = true)
 public class KafkaAuthorizationKeycloak extends KafkaAuthorization {
     private static final long serialVersionUID = 1L;
 
     public static final String TYPE_KEYCLOAK = "keycloak";
 
-    public static final String AUTHORIZER_CLASS_NAME = "io.strimzi.kafka.oauth.server.authorizer.KeycloakRBACAuthorizer";
+    public static final String AUTHORIZER_CLASS_NAME = "io.strimzi.kafka.oauth.server.authorizer.KeycloakAuthorizer";
 
     private String clientId;
     private String tokenEndpointUri;
@@ -41,9 +43,14 @@ public class KafkaAuthorizationKeycloak extends KafkaAuthorization {
     private boolean delegateToKafkaAcls = false;
     private Integer grantsRefreshPeriodSeconds;
     private Integer grantsRefreshPoolSize;
+    private Integer grantsMaxIdleTimeSeconds;
+    private Integer grantsGcPeriodSeconds;
+    private boolean grantsAlwaysLatest = false;
     private Integer connectTimeoutSeconds;
     private Integer readTimeoutSeconds;
+    private Integer httpRetries;
     private List<String> superUsers;
+    private boolean enableMetrics = false;
 
     @Description("Must be `" + TYPE_KEYCLOAK + "`")
     @Override
@@ -135,6 +142,38 @@ public class KafkaAuthorizationKeycloak extends KafkaAuthorization {
         this.grantsRefreshPoolSize = grantsRefreshPoolSize;
     }
 
+    @Description("The time, in seconds, after which an idle grant can be evicted from the cache. The default value is 300.")
+    @Minimum(1)
+    @JsonProperty(defaultValue = "300")
+    public Integer getGrantsMaxIdleTimeSeconds() {
+        return grantsMaxIdleTimeSeconds;
+    }
+
+    public void setGrantsMaxIdleTimeSeconds(Integer grantsMaxIdleTimeSeconds) {
+        this.grantsMaxIdleTimeSeconds = grantsMaxIdleTimeSeconds;
+    }
+
+    @Description("The time, in seconds, between consecutive runs of a job that cleans stale grants from the cache. The default value is 300.")
+    @Minimum(1)
+    @JsonProperty(defaultValue = "300")
+    public Integer getGrantsGcPeriodSeconds() {
+        return grantsGcPeriodSeconds;
+    }
+
+    public void setGrantsGcPeriodSeconds(Integer grantsGcPeriodSeconds) {
+        this.grantsGcPeriodSeconds = grantsGcPeriodSeconds;
+    }
+
+    @Description("Controls whether the latest grants are fetched for a new session. When enabled, grants are retrieved from Keycloak and cached for the user. The default value is `false`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean isGrantsAlwaysLatest() {
+        return grantsAlwaysLatest;
+    }
+
+    public void setGrantsAlwaysLatest(boolean grantsAlwaysLatest) {
+        this.grantsAlwaysLatest = grantsAlwaysLatest;
+    }
+
     @Description("List of super users. Should contain list of user principals which should get unlimited access rights.")
     @Example("- CN=my-user\n" +
             "- CN=my-other-user")
@@ -167,5 +206,26 @@ public class KafkaAuthorizationKeycloak extends KafkaAuthorization {
 
     public void setReadTimeoutSeconds(Integer readTimeoutSeconds) {
         this.readTimeoutSeconds = readTimeoutSeconds;
+    }
+
+    @Description("The maximum number of retries to attempt if an initial HTTP request fails. If not set, the default is to not attempt any retries.")
+    @Minimum(0)
+    @JsonProperty(defaultValue = "0")
+    public Integer getHttpRetries() {
+        return httpRetries;
+    }
+
+    public void setHttpRetries(Integer httpRetries) {
+        this.httpRetries = httpRetries;
+    }
+
+    @Description("Enable or disable OAuth metrics. The default value is `false`.")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean isEnableMetrics() {
+        return enableMetrics;
+    }
+
+    public void setEnableMetrics(boolean enableMetrics) {
+        this.enableMetrics = enableMetrics;
     }
 }

@@ -39,7 +39,7 @@ public class KafkaClients extends BaseClients {
     private int messageCount;
     private String consumerGroup;
     private long delayMs;
-    private String userName;
+    private String username;
     private String caCertSecretName;
     private String headers;
     private PodSecurityProfile podSecurityPolicy;
@@ -88,7 +88,7 @@ public class KafkaClients extends BaseClients {
 
     public void setConsumerGroup(String consumerGroup) {
         if (consumerGroup == null || consumerGroup.isEmpty()) {
-            LOGGER.info("Consumer group were not specified going to create the random one.");
+            LOGGER.info("Consumer group were not specified going to create the random one");
             consumerGroup = ClientUtils.generateRandomConsumerGroup();
         }
         this.consumerGroup = consumerGroup;
@@ -102,12 +102,12 @@ public class KafkaClients extends BaseClients {
         this.delayMs = delayMs;
     }
 
-    public String getUserName() {
-        return userName;
+    public String getUsername() {
+        return username;
     }
 
-    public void setUserName(String userName) {
-        this.userName = userName;
+    public void setUsername(String username) {
+        this.username = username;
     }
 
     public String getCaCertSecretName() {
@@ -211,7 +211,7 @@ public class KafkaClients extends BaseClients {
                             .addNewContainer()
                                 .withName(producerName)
                                 .withImagePullPolicy(Constants.IF_NOT_PRESENT_IMAGE_PULL_POLICY)
-                                .withImage(Environment.TEST_PRODUCER_IMAGE)
+                                .withImage(Environment.TEST_CLIENTS_IMAGE)
                                 .addNewEnv()
                                     .withName("BOOTSTRAP_SERVERS")
                                     .withValue(this.getBootstrapAddress())
@@ -247,6 +247,10 @@ public class KafkaClients extends BaseClients {
                                 .addNewEnv()
                                     .withName("BLOCKING_PRODUCER")
                                     .withValue("true")
+                                .endEnv()
+                                .addNewEnv()
+                                    .withName("CLIENT_TYPE")
+                                    .withValue("KafkaProducer")
                                 .endEnv()
                             .endContainer()
                     .endSpec()
@@ -354,7 +358,7 @@ public class KafkaClients extends BaseClients {
                                 .addNewContainer()
                                     .withName(consumerName)
                                     .withImagePullPolicy(Constants.IF_NOT_PRESENT_IMAGE_PULL_POLICY)
-                                    .withImage(Environment.TEST_CONSUMER_IMAGE)
+                                    .withImage(Environment.TEST_CLIENTS_IMAGE)
                                     .addNewEnv()
                                         .withName("BOOTSTRAP_SERVERS")
                                         .withValue(this.getBootstrapAddress())
@@ -383,6 +387,10 @@ public class KafkaClients extends BaseClients {
                                         .withName("ADDITIONAL_CONFIG")
                                         .withValue(this.getAdditionalConfig())
                                     .endEnv()
+                                    .addNewEnv()
+                                        .withName("CLIENT_TYPE")
+                                        .withValue("KafkaConsumer")
+                                    .endEnv()
                                 .endContainer()
                     .endSpec()
                 .endTemplate()
@@ -410,16 +418,15 @@ public class KafkaClients extends BaseClients {
     }
 
     final protected void configureScramSha(SecurityProtocol securityProtocol) {
-        if (this.getUserName() == null || this.getUserName().isEmpty()) {
+        if (this.getUsername() == null || this.getUsername().isEmpty()) {
             throw new InvalidParameterException("User name for SCRAM-SHA is not set");
         }
 
-        final String saslJaasConfigEncrypted = ResourceManager.kubeClient().getSecret(this.getNamespaceName(), this.getUserName()).getData().get("sasl.jaas.config");
+        final String saslJaasConfigEncrypted = ResourceManager.kubeClient().getSecret(this.getNamespaceName(), this.getUsername()).getData().get("sasl.jaas.config");
         final String saslJaasConfigDecrypted = new String(Base64.getDecoder().decode(saslJaasConfigEncrypted), StandardCharsets.US_ASCII);
 
         this.setAdditionalConfig(this.getAdditionalConfig() +
             // scram-sha
-            "ssl.endpoint.identification.algorithm=\n" +
             "sasl.mechanism=SCRAM-SHA-512\n" +
             "security.protocol=" + securityProtocol + "\n" +
             "sasl.jaas.config=" + saslJaasConfigDecrypted);
@@ -427,13 +434,12 @@ public class KafkaClients extends BaseClients {
 
     final protected void configureTls() {
         this.setAdditionalConfig(this.getAdditionalConfig() +
-            "ssl.endpoint.identification.algorithm=\n" +
             "sasl.mechanism=GSSAPI\n" +
             "security.protocol=" + SecurityProtocol.SSL + "\n");
     }
 
     protected List<EnvVar> getTlsEnvVars() {
-        if (this.getUserName() == null || this.getUserName().isEmpty()) {
+        if (this.getUsername() == null || this.getUsername().isEmpty()) {
             throw new InvalidParameterException("User name for TLS is not set");
         }
 
@@ -441,7 +447,7 @@ public class KafkaClients extends BaseClients {
             .withName("USER_CRT")
             .withNewValueFrom()
                 .withNewSecretKeyRef()
-                    .withName(this.getUserName())
+                    .withName(this.getUsername())
                     .withKey("user.crt")
                 .endSecretKeyRef()
             .endValueFrom()
@@ -451,7 +457,7 @@ public class KafkaClients extends BaseClients {
             .withName("USER_KEY")
             .withNewValueFrom()
                 .withNewSecretKeyRef()
-                    .withName(this.getUserName())
+                    .withName(this.getUsername())
                     .withKey("user.key")
                 .endSecretKeyRef()
             .endValueFrom()

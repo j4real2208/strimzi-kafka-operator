@@ -16,10 +16,15 @@ import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
+import io.strimzi.api.kafka.KafkaConnectList;
 import io.strimzi.api.kafka.KafkaList;
+import io.strimzi.api.kafka.KafkaMirrorMaker2List;
 import io.strimzi.api.kafka.StrimziPodSetList;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaBuilder;
+import io.strimzi.api.kafka.model.KafkaConnect;
+import io.strimzi.api.kafka.model.KafkaConnectBuilder;
+import io.strimzi.api.kafka.model.KafkaMirrorMaker2;
 import io.strimzi.api.kafka.model.StrimziPodSet;
 import io.strimzi.api.kafka.model.StrimziPodSetBuilder;
 import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBuilder;
@@ -27,8 +32,7 @@ import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.ResourceUtils;
 import io.strimzi.operator.cluster.model.PodSetUtils;
-import io.strimzi.operator.cluster.operator.resource.PodRevision;
-import io.strimzi.operator.common.AbstractOperator;
+import io.strimzi.operator.cluster.model.PodRevision;
 import io.strimzi.operator.common.MetricsProvider;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.Labels;
@@ -38,6 +42,7 @@ import io.strimzi.operator.common.operator.resource.StrimziPodSetOperator;
 import io.strimzi.test.TestUtils;
 import io.strimzi.test.mockkube2.MockKube2;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.junit5.VertxExtension;
 import io.vertx.junit5.VertxTestContext;
 import org.junit.jupiter.api.AfterEach;
@@ -49,6 +54,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
@@ -66,6 +72,8 @@ public class StrimziPodSetControllerMockTest {
     private static final Map<String, String> MATCHING_LABELS = Map.of("selector", "matching");
     private static final String OTHER_KAFKA_NAME = "bar";
     private static final Map<String, String> OTHER_LABELS = Map.of("selector", "not-matching");
+    private static final String CONNECT_NAME = "foz";
+    private static final String OTHER_CONNECT_NAME = "baz";
 
     // Injected by Fabric8 Mock Kubernetes Server
     @SuppressWarnings("unused")
@@ -74,28 +82,38 @@ public class StrimziPodSetControllerMockTest {
     private Vertx vertx;
     private StrimziPodSetController controller;
     private CrdOperator<KubernetesClient, Kafka, KafkaList> kafkaOperator;
+    private CrdOperator<KubernetesClient, KafkaConnect, KafkaConnectList> kafkaConnectOperator;
+    private CrdOperator<KubernetesClient, KafkaMirrorMaker2, KafkaMirrorMaker2List> kafkaMirrorMaker2Operator;
     private StrimziPodSetOperator podSetOperator;
     private PodOperator podOperator;
     private MetricsProvider metricsProvider;
+    private WorkerExecutor sharedWorkerExecutor;
 
     @BeforeEach
     public void beforeEach() {
         // Configure the Kubernetes Mock
         mockKube = new MockKube2.MockKube2Builder(client)
                 .withKafkaCrd()
+                .withKafkaConnectCrd()
+                .withKafkaMirrorMaker2Crd()
                 .withStrimziPodSetCrd()
                 .withPodController()
                 .build();
         mockKube.start();
 
         vertx = Vertx.vertx();
+        sharedWorkerExecutor = vertx.createSharedWorkerExecutor("kubernetes-ops-pool");
         kafkaOperator = new CrdOperator<>(vertx, client, Kafka.class, KafkaList.class, Kafka.RESOURCE_KIND);
-        podSetOperator = new StrimziPodSetOperator(vertx, client, 10_000L);
+        kafkaConnectOperator = new CrdOperator<>(vertx, client, KafkaConnect.class, KafkaConnectList.class, KafkaConnect.RESOURCE_KIND);
+        kafkaMirrorMaker2Operator = new CrdOperator<>(vertx, client, KafkaMirrorMaker2.class, KafkaMirrorMaker2List.class, KafkaMirrorMaker2.RESOURCE_KIND);
+        podSetOperator = new StrimziPodSetOperator(vertx, client);
         podOperator = new PodOperator(vertx, client);
         metricsProvider = ResourceUtils.metricsProvider();
 
         kafkaOp().inNamespace(NAMESPACE).resource(kafka(KAFKA_NAME, MATCHING_LABELS)).create();
         kafkaOp().inNamespace(NAMESPACE).resource(kafka(OTHER_KAFKA_NAME, OTHER_LABELS)).create();
+        kafkaConnectOp().inNamespace(NAMESPACE).resource(connect(CONNECT_NAME, MATCHING_LABELS)).create();
+        kafkaConnectOp().inNamespace(NAMESPACE).resource(connect(OTHER_CONNECT_NAME, OTHER_LABELS)).create();
 
         startController();
     }
@@ -104,6 +122,7 @@ public class StrimziPodSetControllerMockTest {
     public void afterEach() {
         stopController();
         mockKube.stop();
+        sharedWorkerExecutor.close();
         vertx.close();
     }
 
@@ -113,6 +132,10 @@ public class StrimziPodSetControllerMockTest {
 
     private MixedOperation<Kafka, KafkaList, Resource<Kafka>> kafkaOp() {
         return client.resources(Kafka.class, KafkaList.class);
+    }
+
+    private MixedOperation<KafkaConnect, KafkaConnectList, Resource<KafkaConnect>> kafkaConnectOp() {
+        return client.resources(KafkaConnect.class, KafkaConnectList.class);
     }
 
     private static Kafka kafka(String name, Map<String, String> labels)   {
@@ -143,30 +166,43 @@ public class StrimziPodSetControllerMockTest {
                     .build();
     }
 
+    private static KafkaConnect connect(String name, Map<String, String> labels)   {
+        return new KafkaConnectBuilder()
+                    .withNewMetadata()
+                        .withName(name)
+                        .withNamespace(NAMESPACE)
+                        .withLabels(labels)
+                    .endMetadata()
+                    .withNewSpec()
+                        .withReplicas(3)
+                    .endSpec()
+                    .build();
+    }
+
     private MixedOperation<StrimziPodSet, StrimziPodSetList, Resource<StrimziPodSet>> podSetOp() {
         return client.resources(StrimziPodSet.class, StrimziPodSetList.class);
     }
 
-    private static StrimziPodSet podSet(String name, String kafkaName, Pod... pods)   {
+    private static StrimziPodSet podSet(String name, String kafkaName, String kind, Pod... pods)   {
         return new StrimziPodSetBuilder()
                     .withNewMetadata()
                         .withName(name)
                         .withNamespace(NAMESPACE)
-                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, kafkaName))
+                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, kind, Labels.STRIMZI_CLUSTER_LABEL, kafkaName))
                     .endMetadata()
                     .withNewSpec()
-                        .withSelector(new LabelSelector(null, Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, kafkaName)))
+                        .withSelector(new LabelSelector(null, Map.of(Labels.STRIMZI_KIND_LABEL, kind, Labels.STRIMZI_CLUSTER_LABEL, kafkaName)))
                         .withPods(PodSetUtils.podsToMaps(Arrays.asList(pods)))
                     .endSpec()
                     .build();
     }
 
-    private static Pod pod(String name, String kafkaName, String podSetName)    {
+    private static Pod pod(String name, String kafkaName, String podSetName, String kind)    {
         Pod pod = new PodBuilder()
                     .withNewMetadata()
                         .withName(name)
                         .withNamespace(NAMESPACE)
-                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, "Kafka", Labels.STRIMZI_CLUSTER_LABEL, kafkaName, Labels.STRIMZI_NAME_LABEL, podSetName))
+                        .withLabels(Map.of(Labels.STRIMZI_KIND_LABEL, kind, Labels.STRIMZI_CLUSTER_LABEL, kafkaName, Labels.STRIMZI_NAME_LABEL, podSetName, Labels.STRIMZI_CONTROLLER_LABEL, "strimzipodset"))
                         .withAnnotations(new HashMap<>())
                     .endMetadata()
                     .withNewSpec()
@@ -202,7 +238,7 @@ public class StrimziPodSetControllerMockTest {
     }
 
     private void startController()  {
-        controller = new StrimziPodSetController(NAMESPACE, Labels.fromMap(MATCHING_LABELS), kafkaOperator, podSetOperator, podOperator, metricsProvider, ClusterOperatorConfig.DEFAULT_POD_SET_CONTROLLER_WORK_QUEUE_SIZE);
+        controller = new StrimziPodSetController(NAMESPACE, Labels.fromMap(MATCHING_LABELS), kafkaOperator, kafkaConnectOperator, kafkaMirrorMaker2Operator, podSetOperator, podOperator, metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         controller.start();
     }
 
@@ -223,13 +259,40 @@ public class StrimziPodSetControllerMockTest {
      * @param context   Test context
      */
     @Test
-    public void testPodCreationDeletionAndRecreation(VertxTestContext context) {
+    public void testPodCreationDeletionAndRecreationKafka(VertxTestContext context) {
+        podCreationDeletionAndRecreation(context, "Kafka", KAFKA_NAME);
+    }
+
+    /**
+     * Tests the basic operations:
+     *   - Creation of StrimziPodSet and the managed pod
+     *   - Re-creation of the managed pod when it is deleted
+     *   - Deletion of the StrimziPodSet and the managed pod
+     *
+     * @param context   Test context
+     */
+    @Test
+    public void testPodCreationDeletionAndRecreationConnect(VertxTestContext context) {
+        podCreationDeletionAndRecreation(context, "KafkaConnect", CONNECT_NAME);
+    }
+
+    /**
+     * Tests the basic operations with configurable resource:
+     *   - Creation of StrimziPodSet and the managed pod
+     *   - Re-creation of the managed pod when it is deleted
+     *   - Deletion of the StrimziPodSet and the managed pod
+     *
+     * @param context   Test context
+     * @param kind      Kind od the custom resource
+     * @param name      Name of the custom resource
+     */
+    private void podCreationDeletionAndRecreation(VertxTestContext context, String kind, String name) {
         String podSetName = "basic-test";
         String podName = podSetName + "-0";
 
         try {
-            Pod pod = pod(podName, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod)).create();
+            Pod pod = pod(podName, name, podSetName, kind);
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, name, kind, pod)).create();
 
             // Check that pod is created
             TestUtils.waitFor(
@@ -300,8 +363,8 @@ public class StrimziPodSetControllerMockTest {
         String pod2Name = podSetName + "-1";
 
         try {
-            Pod pod1 = pod(pod1Name, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod1)).create();
+            Pod pod1 = pod(pod1Name, KAFKA_NAME, podSetName, "Kafka");
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod1)).create();
 
             // Wait until the pod is ready
             TestUtils.waitFor(
@@ -325,8 +388,8 @@ public class StrimziPodSetControllerMockTest {
                     () -> context.failNow("Pod stats do not match"));
 
             // Scale-up the pod-set
-            Pod pod2 = pod(pod2Name, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod1, pod2)).replace();
+            Pod pod2 = pod(pod2Name, KAFKA_NAME, podSetName, "Kafka");
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod1, pod2)).update();
 
             // Wait until the new pod is ready
             TestUtils.waitFor(
@@ -350,7 +413,7 @@ public class StrimziPodSetControllerMockTest {
                     () -> context.failNow("Pod stats do not match"));
 
             // Scale-down the pod-set
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod1)).replace();
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod1)).update();
 
             // Wait until the pod is deleted
             TestUtils.waitFor(
@@ -392,8 +455,8 @@ public class StrimziPodSetControllerMockTest {
         String podName = podSetName + "-0";
 
         try {
-            Pod originalPod = pod(podName, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, originalPod)).create();
+            Pod originalPod = pod(podName, KAFKA_NAME, podSetName, "Kafka");
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", originalPod)).create();
 
             // Wait until the pod is ready
             TestUtils.waitFor(
@@ -421,10 +484,10 @@ public class StrimziPodSetControllerMockTest {
             String resourceVersion = initialPod.getMetadata().getResourceVersion();
 
             // Update the pod with a new revision and
-            Pod updatedPod = pod(podName, KAFKA_NAME, podSetName);
+            Pod updatedPod = pod(podName, KAFKA_NAME, podSetName, "Kafka");
             updatedPod.getMetadata().getAnnotations().put(PodRevision.STRIMZI_REVISION_ANNOTATION, "new-revision");
             updatedPod.getSpec().setTerminationGracePeriodSeconds(1L);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, updatedPod)).replace();
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", updatedPod)).update();
 
             // Check status of the PodSet
             TestUtils.waitFor(
@@ -462,7 +525,7 @@ public class StrimziPodSetControllerMockTest {
         String podName = podSetName + "-0";
 
         try {
-            Pod pod = pod(podName, KAFKA_NAME, podSetName);
+            Pod pod = pod(podName, KAFKA_NAME, podSetName, "Kafka");
             client.pods().inNamespace(NAMESPACE).resource(pod).create();
 
             // Wait until the pod is ready
@@ -473,7 +536,7 @@ public class StrimziPodSetControllerMockTest {
                     () -> client.pods().inNamespace(NAMESPACE).withName(podName).isReady(),
                     () -> context.failNow("Test timed out waiting for pod readiness!"));
 
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod)).create();
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod)).create();
 
             // Check status of the PodSet
             TestUtils.waitFor(
@@ -505,7 +568,22 @@ public class StrimziPodSetControllerMockTest {
      * @param context   Test context
      */
     @Test
-    public void testCrSelector(VertxTestContext context) {
+    public void testCrSelectorKafka(VertxTestContext context) {
+        testCrSelector(context, "Kafka", KAFKA_NAME, OTHER_KAFKA_NAME);
+    }
+
+    /**
+     * Tests that the controller will ignore pods or node sets when the Kafka Connect cluster they belong to doesn't match the
+     * custom resource selector
+     *
+     * @param context   Test context
+     */
+    @Test
+    public void testCrSelectorKafkaConnect(VertxTestContext context) {
+        testCrSelector(context, "KafkaConnect", CONNECT_NAME, OTHER_CONNECT_NAME);
+    }
+
+    private void testCrSelector(VertxTestContext context, String kind, String name, String otherName) {
         String podSetName = "matching-podset";
         String otherPodSetName = "other-podset";
         String podName = podSetName + "-0";
@@ -515,16 +593,16 @@ public class StrimziPodSetControllerMockTest {
 
         try {
             // Create the pod set which should be reconciled
-            Pod pod = pod(podName, KAFKA_NAME, podSetName);
-            Pod preExistingPod = pod(preExistingPodName, KAFKA_NAME, podSetName);
+            Pod pod = pod(podName, name, podSetName, kind);
+            Pod preExistingPod = pod(preExistingPodName, name, podSetName, kind);
             client.pods().inNamespace(NAMESPACE).resource(preExistingPod).create();
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod)).create();
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, name, kind, pod)).create();
 
             // Create the pod set which should be ignored
-            Pod otherPod = pod(otherPodName, OTHER_KAFKA_NAME, otherPodSetName);
-            Pod otherPreExistingPod = pod(otherPreExistingPodName, OTHER_KAFKA_NAME, otherPodSetName);
+            Pod otherPod = pod(otherPodName, otherName, otherPodSetName, kind);
+            Pod otherPreExistingPod = pod(otherPreExistingPodName, otherName, otherPodSetName, kind);
             client.pods().inNamespace(NAMESPACE).resource(otherPreExistingPod).create();
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(otherPodSetName, OTHER_KAFKA_NAME, otherPod)).create();
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(otherPodSetName, otherName, kind, otherPod)).create();
 
             // Check that the pre-existing pod for matching pod set is deleted
             TestUtils.waitFor(
@@ -582,8 +660,8 @@ public class StrimziPodSetControllerMockTest {
         String podName = podSetName + "-0";
 
         try {
-            Pod pod = pod(podName, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod)).create();
+            Pod pod = pod(podName, KAFKA_NAME, podSetName, "Kafka");
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod)).create();
 
             // Wait for PodSet to be ready
             TestUtils.waitFor(
@@ -647,8 +725,8 @@ public class StrimziPodSetControllerMockTest {
         String podName = podSetName + "-0";
 
         try {
-            Pod pod = pod(podName, KAFKA_NAME, podSetName);
-            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, pod)).create();
+            Pod pod = pod(podName, KAFKA_NAME, podSetName, "Kafka");
+            podSetOp().inNamespace(NAMESPACE).resource(podSet(podSetName, KAFKA_NAME, "Kafka", pod)).create();
 
             // Check that pod is created
             TestUtils.waitFor(
@@ -675,6 +753,9 @@ public class StrimziPodSetControllerMockTest {
             // We keep the resource version for pod re-creation test
             String resourceVersion = failedPod.getMetadata().getResourceVersion();
 
+            // Used to store reference to the recreated Pod
+            AtomicReference<Pod> recreatedPod = new AtomicReference<>();
+
             // Check that pod is created
             TestUtils.waitFor(
                     "Wait for Pod to be recreated",
@@ -682,13 +763,23 @@ public class StrimziPodSetControllerMockTest {
                     10_000,
                     () -> {
                         Pod p = client.pods().inNamespace(NAMESPACE).withName(podName).get();
-                        return p != null && !resourceVersion.equals(p.getMetadata().getResourceVersion());
+                        // Waits for the Pod to be re-created by the StrimziPodSetController and for its status to be
+                        // updated by MockKube (and its MockPodController). Waiting for the status of the Pod to be
+                        // updated is important to avoid any Null Pointer Exceptions in the asserts done after
+                        // the wait is complete
+                        if (p != null
+                                && !resourceVersion.equals(p.getMetadata().getResourceVersion())
+                                && p.getStatus() != null) {
+                            recreatedPod.set(p);
+                            return true;
+                        } else {
+                            return false;
+                        }
                     },
                     () -> context.failNow("Test timed out waiting for pod recreation!"));
 
             // Check the Pod is not failed anymore
-            Pod recreatedPod = client.pods().inNamespace(NAMESPACE).withName(podName).get();
-            assertThat(recreatedPod.getStatus().getPhase(), is(not("Failed")));
+            assertThat(recreatedPod.get().getStatus().getPhase(), is(not("Failed")));
 
             context.completeNow();
         } finally {

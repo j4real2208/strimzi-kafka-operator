@@ -18,7 +18,7 @@ This procedure shows how to deploy the Cluster Operator to watch Strimzi resourc
 +
 For example, in this procedure the Cluster Operator is installed into the namespace `my-cluster-operator-namespace`.
 +
-include::snip-cluster-operator-namespace-sed.adoc[]
+include::../../shared/snip-cluster-operator-namespace-sed.adoc[]
 
 . Edit the `install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml` file
 to add a list of all the namespaces the Cluster Operator will watch to the `STRIMZI_NAMESPACE` environment variable.
@@ -50,6 +50,7 @@ repeating them for `watched-namespace-1`, `watched-namespace-2`, `watched-namesp
 +
 [source,shell,subs="+quotes,attributes+"]
 kubectl create -f install/cluster-operator/020-RoleBinding-strimzi-cluster-operator.yaml -n _<watched_namespace>_
+kubectl create -f install/cluster-operator/023-RoleBinding-strimzi-cluster-operator.yaml -n _<watched_namespace>_
 kubectl create -f install/cluster-operator/031-RoleBinding-strimzi-cluster-operator-entity-operator-delegation.yaml -n _<watched_namespace>_
 
 . Deploy the Cluster Operator:

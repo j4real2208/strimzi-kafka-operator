@@ -20,48 +20,59 @@ import io.strimzi.api.kafka.model.KafkaUserTlsClientAuthentication;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.user.model.KafkaUserModel;
 import io.strimzi.operator.user.model.acl.SimpleAclRule;
+import io.strimzi.operator.user.UserOperatorConfig.UserOperatorConfigBuilder;
 
-import java.util.Base64;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
+import java.util.Collections;
 import java.util.Set;
+import java.util.HashSet;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.stream.Collectors;
 
 public class ResourceUtils {
-    public static final Map LABELS = Collections.singletonMap("foo", "bar");
+    public static final Map<String, String> LABELS = Collections.singletonMap("foo", "bar");
     public static final String NAMESPACE = "namespace";
     public static final String NAME = "user";
-    public static final String CA_CERT_NAME = NAME + "-cert";
-    public static final String CA_KEY_NAME = NAME + "-key";
+    public static final String CA_CERT_NAME = "ca-cert";
+    public static final String CA_KEY_NAME = "ca-key";
     public static final String PASSWORD = "my-password";
 
-    public static UserOperatorConfig createUserOperatorConfig(Map<String, String> labels, boolean aclsAdminApiSupported, boolean useKRaft, String scramShaPasswordLength) {
+    public static UserOperatorConfig createUserOperatorConfig(Map<String, String> labels, boolean aclsAdminApiSupported, String scramShaPasswordLength, String secretPrefix) {
         Map<String, String> envVars = new HashMap<>(4);
-        envVars.put(UserOperatorConfig.STRIMZI_NAMESPACE, NAMESPACE);
-        envVars.put(UserOperatorConfig.STRIMZI_LABELS, labels.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(",")));
-        envVars.put(UserOperatorConfig.STRIMZI_CA_CERT_SECRET_NAME, CA_CERT_NAME);
-        envVars.put(UserOperatorConfig.STRIMZI_CA_KEY_SECRET_NAME, CA_KEY_NAME);
-        envVars.put(UserOperatorConfig.STRIMZI_ACLS_ADMIN_API_SUPPORTED, Boolean.toString(aclsAdminApiSupported));
-        envVars.put(UserOperatorConfig.STRIMZI_KRAFT_ENABLED, Boolean.toString(useKRaft));
-        if (!scramShaPasswordLength.equals("12")) {
-            envVars.put(UserOperatorConfig.STRIMZI_SCRAM_SHA_PASSWORD_LENGTH, scramShaPasswordLength);
+        envVars.put(UserOperatorConfig.NAMESPACE.key(), NAMESPACE);
+        envVars.put(UserOperatorConfig.LABELS.key(), labels.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(",")));
+        envVars.put(UserOperatorConfig.CA_CERT_SECRET_NAME.key(), CA_CERT_NAME);
+        envVars.put(UserOperatorConfig.CA_KEY_SECRET_NAME.key(), CA_KEY_NAME);
+        envVars.put(UserOperatorConfig.ACLS_ADMIN_API_SUPPORTED.key(), Boolean.toString(aclsAdminApiSupported));
+
+        if (!scramShaPasswordLength.equals("32")) {
+            envVars.put(UserOperatorConfig.SCRAM_SHA_PASSWORD_LENGTH.key(), scramShaPasswordLength);
         }
 
-        return UserOperatorConfig.fromMap(envVars);
+        if (secretPrefix != null) {
+            envVars.put(UserOperatorConfig.SECRET_PREFIX.key(), secretPrefix);
+        }
+
+        return UserOperatorConfig.buildFromMap(envVars);
     }
 
-    public static UserOperatorConfig createUserOperatorConfig(Map<String, String> labels) {
-        return createUserOperatorConfig(labels, true, false, "12");
+    public static UserOperatorConfig createUserOperatorConfigForUserControllerTesting(Map<String, String> labels, int fullReconciliationInterval, int queueSize, int poolSize, String secretPrefix) {
+        return new UserOperatorConfigBuilder(createUserOperatorConfig(labels, false, "32", secretPrefix))
+                      .with(UserOperatorConfig.RECONCILIATION_INTERVAL_MS.key(), String.valueOf(fullReconciliationInterval))
+                      .with(UserOperatorConfig.WORK_QUEUE_SIZE.key(), String.valueOf(queueSize))
+                      .with(UserOperatorConfig.USER_OPERATIONS_THREAD_POOL_SIZE.key(), String.valueOf(poolSize))
+                      .build();
     }
 
     public static UserOperatorConfig createUserOperatorConfig() {
-        return createUserOperatorConfig(Map.of(), true, false, "12");
+        return createUserOperatorConfig(Map.of(), true, "32", null);
     }
 
     public static UserOperatorConfig createUserOperatorConfig(String scramShaPasswordLength) {
-        return createUserOperatorConfig(Map.of(), true, false, scramShaPasswordLength);
+        return new UserOperatorConfigBuilder(createUserOperatorConfig())
+                       .with(UserOperatorConfig.SCRAM_SHA_PASSWORD_LENGTH.key(), scramShaPasswordLength)
+                       .build();
     }
 
     public static KafkaUser createKafkaUser(KafkaUserAuthentication authentication) {
@@ -78,23 +89,20 @@ public class ResourceUtils {
                     .withNewKafkaUserAuthorizationSimple()
                         .addNewAcl()
                             .withNewAclRuleTopicResource()
-                                .withName("my-topic")
-                            .endAclRuleTopicResource()
-                            .withOperation(AclOperation.READ)
+                                .withName("my-topic11").endAclRuleTopicResource()
+                            .withOperations(AclOperation.READ, AclOperation.CREATE, AclOperation.WRITE)
                         .endAcl()
                         .addNewAcl()
                             .withNewAclRuleTopicResource()
                                 .withName("my-topic")
                             .endAclRuleTopicResource()
-                            .withOperation(AclOperation.DESCRIBE)
-                        .endAcl()
-                        .addNewAcl()
-                            .withNewAclRuleGroupResource()
-                                .withName("my-group")
-                            .endAclRuleGroupResource()
-                            .withOperation(AclOperation.READ)
+                            .withOperations(AclOperation.DESCRIBE, AclOperation.READ)
                         .endAcl()
                     .endKafkaUserAuthorizationSimple()
+                    .withNewQuotas()
+                        .withConsumerByteRate(1_024 * 1_024)
+                        .withProducerByteRate(1_024 * 1_024)
+                    .endQuotas()
                 .endSpec()
                 .build();
     }
@@ -115,19 +123,13 @@ public class ResourceUtils {
                             .withNewAclRuleTopicResource()
                                 .withName("my-topic")
                             .endAclRuleTopicResource()
-                        .withOperation(AclOperation.READ)
-                        .endAcl()
-                        .addNewAcl()
-                            .withNewAclRuleTopicResource()
-                                .withName("my-topic")
-                            .endAclRuleTopicResource()
-                            .withOperation(AclOperation.DESCRIBE)
+                        .withOperations(AclOperation.READ, AclOperation.DESCRIBE)
                         .endAcl()
                         .addNewAcl()
                             .withNewAclRuleGroupResource()
                                 .withName("my-group")
                             .endAclRuleGroupResource()
-                            .withOperation(AclOperation.READ)
+                            .withOperations(AclOperation.READ)
                         .endAcl()
                     .endKafkaUserAuthorizationSimple()
                 .endSpec()
@@ -207,14 +209,14 @@ public class ResourceUtils {
     }
 
     public static Set<SimpleAclRule> createExpectedSimpleAclRules(KafkaUser user) {
-        Set<SimpleAclRule> simpleAclRules = new HashSet<SimpleAclRule>();
+        Set<SimpleAclRule> simpleAclRules = new HashSet<>();
 
         if (user.getSpec().getAuthorization() != null && KafkaUserAuthorizationSimple.TYPE_SIMPLE.equals(user.getSpec().getAuthorization().getType())) {
             KafkaUserAuthorizationSimple adapted = (KafkaUserAuthorizationSimple) user.getSpec().getAuthorization();
 
             if (adapted.getAcls() != null) {
                 for (AclRule rule : adapted.getAcls()) {
-                    simpleAclRules.add(SimpleAclRule.fromCrd(rule));
+                    simpleAclRules.addAll(SimpleAclRule.fromCrd(rule));
                 }
             }
         }

@@ -25,7 +25,7 @@ import io.strimzi.systemtest.AbstractST;
 import io.strimzi.systemtest.Constants;
 import io.strimzi.systemtest.Environment;
 import io.strimzi.systemtest.annotations.IsolatedTest;
-import io.strimzi.systemtest.annotations.KRaftNotSupported;
+import io.strimzi.systemtest.annotations.KRaftWithoutUTONotSupported;
 import io.strimzi.systemtest.cli.KafkaCmdClient;
 import io.strimzi.systemtest.enums.CustomResourceStatus;
 import io.strimzi.systemtest.annotations.ParallelNamespaceTest;
@@ -50,10 +50,10 @@ import io.strimzi.systemtest.utils.kafkaUtils.KafkaUtils;
 import io.strimzi.systemtest.utils.kubeUtils.controllers.DeploymentUtils;
 import io.strimzi.systemtest.utils.kubeUtils.objects.PodUtils;
 import io.strimzi.test.TestUtils;
-import io.strimzi.systemtest.annotations.ParallelSuite;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.Level;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.extension.ExtensionContext;
 
@@ -75,26 +75,24 @@ import static io.strimzi.test.k8s.KubeClusterResource.kubeClient;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @Tag(REGRESSION)
-@ParallelSuite
 class LoggingChangeST extends AbstractST {
     private static final Logger LOGGER = LogManager.getLogger(LoggingChangeST.class);
 
     private static final Pattern DEFAULT_LOG4J_PATTERN = Pattern.compile("^(?<date>[\\d-]+) (?<time>[\\d:,]+) (?<status>\\w+) (?<message>.+)");
 
-    private final String namespace = testSuiteNamespaceManager.getMapOfAdditionalNamespaces().get(LoggingChangeST.class.getSimpleName()).stream().findFirst().get();
-
     @ParallelNamespaceTest
-    @KRaftNotSupported("Debug needed - https://github.com/strimzi/strimzi-kafka-operator/issues/6863")
     @SuppressWarnings({"checkstyle:MethodLength"})
     void testJSONFormatLogging(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.kafkaStatefulSetName(clusterName));
         final LabelSelector zkSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.zookeeperStatefulSetName(clusterName));
 
@@ -199,12 +197,12 @@ class LoggingChangeST extends AbstractST {
             .addToData("log4j2.properties", loggersConfigCO)
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapKafka).createOrReplace();
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapOperators).createOrReplace();
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapZookeeper).createOrReplace();
-        kubeClient().getClient().configMaps().inNamespace(clusterOperator.getDeploymentNamespace()).resource(configMapCO).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, configMapKafka);
+        kubeClient().createConfigMapInNamespace(namespaceName, configMapOperators);
+        kubeClient().createConfigMapInNamespace(namespaceName, configMapZookeeper);
+        kubeClient().updateConfigMapInNamespace(clusterOperator.getDeploymentNamespace(), configMapCO);
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 3)
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 3)
             .editOrNewSpec()
                 .editKafka()
                     //.withLogging(new ExternalLoggingBuilder().withName(configMapKafkaName).build())
@@ -247,36 +245,37 @@ class LoggingChangeST extends AbstractST {
 
         StUtils.checkLogForJSONFormat(clusterOperator.getDeploymentNamespace(), operatorSnapshot, ResourceManager.getCoDeploymentName());
         StUtils.checkLogForJSONFormat(namespaceName, kafkaPods, "kafka");
-        StUtils.checkLogForJSONFormat(namespaceName, zkPods, "zookeeper");
         if (!Environment.isKRaftModeEnabled()) {
+            StUtils.checkLogForJSONFormat(namespaceName, zkPods, "zookeeper");
             StUtils.checkLogForJSONFormat(namespaceName, eoPods, "topic-operator");
         }
         StUtils.checkLogForJSONFormat(namespaceName, eoPods, "user-operator");
 
         // set loggers of CO back to original
         configMapCO.getData().put("log4j2.properties", originalCoLoggers);
-        kubeClient().getClient().configMaps().inNamespace(clusterOperator.getDeploymentNamespace()).resource(configMapCO).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(clusterOperator.getDeploymentNamespace(), configMapCO);
     }
 
     @ParallelNamespaceTest
     @Tag(ROLLING_UPDATE)
-    @KRaftNotSupported("TopicOperator is not supported by KRaft mode and is used in this test class")
+    @KRaftWithoutUTONotSupported
     @SuppressWarnings({"checkstyle:MethodLength", "checkstyle:CyclomaticComplexity"})
     void testDynamicallySetEOloggingLevels(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
 
         InlineLogging ilOff = new InlineLogging();
         ilOff.setLoggers(Collections.singletonMap("rootLogger.level", "OFF"));
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 1, 1)
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 1, 1)
             .editSpec()
                 .editEntityOperator()
                     .editTopicOperator()
-                        .withInlineLogging(ilOff)
+                        .withLogging(ilOff)
                     .endTopicOperator()
                     .editUserOperator()
-                        .withInlineLogging(ilOff)
+                        .withLogging(ilOff)
                     .endUserOperator()
                 .endEntityOperator()
             .endSpec()
@@ -287,7 +286,7 @@ class LoggingChangeST extends AbstractST {
 
         final String eoPodName = eoPods.keySet().iterator().next();
 
-        LOGGER.info("Checking if EO pod contains any log (except configuration)");
+        LOGGER.info("Checking if EO Pod contains any log (except configuration)");
         assertFalse(DEFAULT_LOG4J_PATTERN.matcher(StUtils.getLogFromPodByTime(namespaceName, eoPodName, "user-operator", "30s")).find());
 
         LOGGER.info("Changing rootLogger level to DEBUG with inline logging");
@@ -348,8 +347,8 @@ class LoggingChangeST extends AbstractST {
                 "rootLogger.additivity=false"))
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapTo).createOrReplace();
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapUo).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, configMapTo);
+        kubeClient().createConfigMapInNamespace(namespaceName, configMapUo);
 
         ExternalLogging elTo = new ExternalLoggingBuilder()
             .withNewValueFrom()
@@ -431,8 +430,8 @@ class LoggingChangeST extends AbstractST {
                 "rootLogger.additivity=false"))
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapTo).createOrReplace();
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMapUo).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(namespaceName, configMapTo);
+        kubeClient().updateConfigMapInNamespace(namespaceName, configMapUo);
 
         LOGGER.info("Waiting for log4j2.properties will contain desired settings");
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
@@ -451,7 +450,7 @@ class LoggingChangeST extends AbstractST {
                     DEFAULT_LOG4J_PATTERN.matcher(toLog).find();
             });
 
-        assertThat("EO pod should not roll", DeploymentUtils.depSnapshot(namespaceName, eoDeploymentName), equalTo(eoPods));
+        assertThat("EO Pod should not roll", DeploymentUtils.depSnapshot(namespaceName, eoDeploymentName), equalTo(eoPods));
     }
 
     @ParallelNamespaceTest
@@ -469,12 +468,12 @@ class LoggingChangeST extends AbstractST {
         ilOff.setLoggers(loggers);
 
         // create resources async
-        resourceManager.createResource(extensionContext, false,
+        resourceManager.createResourceWithoutWait(extensionContext,
             KafkaTemplates.kafkaPersistent(testStorage.getClusterName(), 1, 1).build(),
             ScraperTemplates.scraperPod(testStorage.getNamespaceName(), testStorage.getScraperName()).build(),
             KafkaBridgeTemplates.kafkaBridge(testStorage.getClusterName(), KafkaResources.tlsBootstrapAddress(testStorage.getClusterName()), 1)
                 .editSpec()
-                    .withInlineLogging(ilOff)
+                    .withLogging(ilOff)
                 .endSpec()
                 .build());
 
@@ -523,7 +522,7 @@ class LoggingChangeST extends AbstractST {
                     "appender.console.type = Console\n" +
                     "appender.console.name = STDOUT\n" +
                     "appender.console.layout.type = PatternLayout\n" +
-                    "appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n\n" +
+                    "appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss} %-5p [%t] %c{1}:%L - %m%n\n" +
                     "\n" +
                     "rootLogger.level = OFF\n" +
                     "rootLogger.appenderRefs = console\n" +
@@ -544,7 +543,7 @@ class LoggingChangeST extends AbstractST {
                     "logger.ready.level = OFF"))
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(testStorage.getNamespaceName()).resource(configMapBridge).createOrReplace();
+        kubeClient().createConfigMapInNamespace(testStorage.getNamespaceName(), configMapBridge);
 
         ExternalLogging bridgeXternalLogging = new ExternalLoggingBuilder()
             .withNewValueFrom()
@@ -575,12 +574,12 @@ class LoggingChangeST extends AbstractST {
                 return bridgeLog != null && bridgeLog.isEmpty() && !DEFAULT_LOG4J_PATTERN.matcher(bridgeLog).find();
             });
 
-        assertThat("Bridge pod should not roll", DeploymentUtils.depSnapshot(testStorage.getNamespaceName(), KafkaBridgeResources.deploymentName(testStorage.getClusterName())), equalTo(bridgeSnapshot));
+        assertThat("Bridge Pod should not roll", DeploymentUtils.depSnapshot(testStorage.getNamespaceName(), KafkaBridgeResources.deploymentName(testStorage.getClusterName())), equalTo(bridgeSnapshot));
     }
 
     @IsolatedTest("Scraping log from shared Cluster Operator")
     @Tag(ROLLING_UPDATE)
-    void testDynamicallySetClusterOperatorLoggingLevels(ExtensionContext extensionContext) throws InterruptedException {
+    void testDynamicallySetClusterOperatorLoggingLevels(ExtensionContext extensionContext) {
         final Map<String, String> coPod = DeploymentUtils.depSnapshot(clusterOperator.getDeploymentNamespace(), STRIMZI_DEPLOYMENT_NAME);
         final String coPodName = PodUtils.getPodsByPrefixInNameWithDynamicWait(clusterOperator.getDeploymentNamespace(), STRIMZI_DEPLOYMENT_NAME).get(0).getMetadata().getName();
         final String command = "cat /opt/strimzi/custom-config/log4j2.properties";
@@ -622,18 +621,18 @@ class LoggingChangeST extends AbstractST {
         assertThat(log4jConfig, not(equalTo(cmdKubeClient().namespace(clusterOperator.getDeploymentNamespace()).execInPod(coPodName, "/bin/bash", "-c", command).out().trim())));
 
         LOGGER.info("Changing logging for cluster-operator");
-        kubeClient().getClient().configMaps().inNamespace(clusterOperator.getDeploymentNamespace()).resource(coMap).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(clusterOperator.getDeploymentNamespace(), coMap);
 
         LOGGER.info("Waiting for log4j2.properties will contain desired settings");
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> cmdKubeClient().namespace(clusterOperator.getDeploymentNamespace()).execInPod(coPodName, "/bin/bash", "-c", command).out().contains("rootLogger.level = OFF")
         );
 
-        LOGGER.info("Checking log4j2.properties in CO pod");
+        LOGGER.info("Checking log4j2.properties in CO Pod");
         String podLogConfig = cmdKubeClient().namespace(clusterOperator.getDeploymentNamespace()).execInPod(coPodName, "/bin/bash", "-c", command).out().trim();
         assertThat(podLogConfig, equalTo(log4jConfig));
 
-        LOGGER.info("Checking if CO rolled its pod");
+        LOGGER.info("Checking if CO rolled its Pod");
         assertThat(coPod, equalTo(DeploymentUtils.depSnapshot(clusterOperator.getDeploymentNamespace(), STRIMZI_DEPLOYMENT_NAME)));
 
         TestUtils.waitFor("log to be empty", Duration.ofMillis(100).toMillis(), Constants.SAFETY_RECONCILIATION_INTERVAL,
@@ -648,18 +647,18 @@ class LoggingChangeST extends AbstractST {
         coMap.setData(Collections.singletonMap("log4j2.properties", log4jConfig));
 
         LOGGER.info("Changing logging for cluster-operator");
-        kubeClient().getClient().configMaps().inNamespace(clusterOperator.getDeploymentNamespace()).resource(coMap).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(clusterOperator.getDeploymentNamespace(), coMap);
 
         LOGGER.info("Waiting for log4j2.properties will contain desired settings");
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> cmdKubeClient().namespace(clusterOperator.getDeploymentNamespace()).execInPod(coPodName, "/bin/bash", "-c", command).out().contains("rootLogger.level = INFO")
         );
 
-        LOGGER.info("Checking log4j2.properties in CO pod");
+        LOGGER.info("Checking log4j2.properties in CO Pod");
         podLogConfig = cmdKubeClient().namespace(clusterOperator.getDeploymentNamespace()).execInPod(coPodName, "/bin/bash", "-c", command).out().trim();
         assertThat(podLogConfig, equalTo(log4jConfig));
 
-        LOGGER.info("Checking if CO rolled its pod");
+        LOGGER.info("Checking if CO rolled its Pod");
         assertThat(coPod, equalTo(DeploymentUtils.depSnapshot(clusterOperator.getDeploymentNamespace(), STRIMZI_DEPLOYMENT_NAME)));
 
         TestUtils.waitFor("log to not be empty", Duration.ofMillis(100).toMillis(), Constants.SAFETY_RECONCILIATION_INTERVAL,
@@ -675,22 +674,23 @@ class LoggingChangeST extends AbstractST {
     @Tag(CONNECT_COMPONENTS)
     void testDynamicallySetConnectLoggingLevels(ExtensionContext extensionContext) {
         TestStorage testStorage = new TestStorage(extensionContext);
+        LabelSelector labelSelector = KafkaConnectResource.getLabelSelector(testStorage.getClusterName(), KafkaConnectResources.deploymentName(testStorage.getClusterName()));
 
         InlineLogging ilOff = new InlineLogging();
         Map<String, String> loggers = new HashMap<>();
         loggers.put("connect.root.logger.level", "OFF");
         ilOff.setLoggers(loggers);
 
-        KafkaConnect connect = KafkaConnectTemplates.kafkaConnect(testStorage.getClusterName(), 1)
+        KafkaConnect connect = KafkaConnectTemplates.kafkaConnect(testStorage.getClusterName(), testStorage.getNamespaceName(), 1)
             .editSpec()
-                .withInlineLogging(ilOff)
+                .withLogging(ilOff)
             .endSpec()
             .editMetadata()
                 .addToAnnotations(Annotations.STRIMZI_IO_USE_CONNECTOR_RESOURCES, "true")
             .endMetadata()
             .build();
 
-        resourceManager.createResource(extensionContext, false,
+        resourceManager.createResourceWithoutWait(extensionContext,
             KafkaTemplates.kafkaEphemeral(testStorage.getClusterName(), 3).build(),
             connect,
             ScraperTemplates.scraperPod(testStorage.getNamespaceName(), testStorage.getScraperName()).build()
@@ -698,12 +698,12 @@ class LoggingChangeST extends AbstractST {
 
         resourceManager.synchronizeResources(extensionContext);
 
-        LOGGER.info("Deploy NetworkPolicies for KafkaConnect");
+        LOGGER.info("Deploying NetworkPolicies for KafkaConnect");
         NetworkPolicyResource.deployNetworkPolicyForResource(extensionContext, connect, KafkaConnectResources.deploymentName(testStorage.getClusterName()));
 
         String scraperPodName = PodUtils.getPodsByPrefixInNameWithDynamicWait(testStorage.getNamespaceName(), testStorage.getScraperName()).get(0).getMetadata().getName();
 
-        Map<String, String> connectSnapshot = DeploymentUtils.depSnapshot(testStorage.getNamespaceName(), KafkaConnectResources.deploymentName(testStorage.getClusterName()));
+        Map<String, String> connectSnapshot = PodUtils.podSnapshot(testStorage.getNamespaceName(), labelSelector);
         final String connectPodName = connectSnapshot.keySet().iterator().next();
 
         LOGGER.info("Asserting if log is without records");
@@ -750,7 +750,7 @@ class LoggingChangeST extends AbstractST {
                 .withData(Collections.singletonMap("log4j.properties", log4jConfig))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(testStorage.getNamespaceName()).resource(connectLoggingMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(testStorage.getNamespaceName(), connectLoggingMap);
 
         ExternalLogging connectXternalLogging = new ExternalLoggingBuilder()
             .withNewValueFrom()
@@ -780,14 +780,15 @@ class LoggingChangeST extends AbstractST {
                 return kcLog != null && kcLog.isEmpty() && !DEFAULT_LOG4J_PATTERN.matcher(kcLog).find();
             });
 
-        assertThat("Connect pod should not roll", DeploymentUtils.depSnapshot(testStorage.getNamespaceName(), KafkaConnectResources.deploymentName(testStorage.getClusterName())), equalTo(connectSnapshot));
+        assertThat("Connect Pod should not roll", PodUtils.podSnapshot(testStorage.getNamespaceName(), labelSelector), equalTo(connectSnapshot));
     }
 
     @ParallelNamespaceTest
     void testDynamicallySetKafkaLoggingLevels(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
-        final String scraperName = mapWithScraperNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
+        final String scraperName = testStorage.getScraperName();
         String kafkaName = KafkaResources.kafkaStatefulSetName(clusterName);
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, kafkaName);
 
@@ -809,11 +810,11 @@ class LoggingChangeST extends AbstractST {
 
         ilOff.setLoggers(log4jConfig);
 
-        resourceManager.createResource(extensionContext,
+        resourceManager.createResourceWithWait(extensionContext,
             KafkaTemplates.kafkaEphemeral(clusterName, 3, 1)
                 .editSpec()
                     .editKafka()
-                        .withInlineLogging(ilOff)
+                        .withLogging(ilOff)
                     .endKafka()
                 .endSpec()
                 .build(),
@@ -842,7 +843,7 @@ class LoggingChangeST extends AbstractST {
             k.getSpec().getKafka().setLogging(ilDebug);
         }, namespaceName);
 
-        LOGGER.info("Waiting for dynamic change in the kafka pod");
+        LOGGER.info("Waiting for dynamic change in the Kafka Pod");
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> KafkaCmdClient.describeKafkaBrokerLoggersUsingPodCli(namespaceName, scraperPodName, KafkaResources.plainBootstrapAddress(clusterName), 0).contains("root=DEBUG"));
 
@@ -882,7 +883,7 @@ class LoggingChangeST extends AbstractST {
                 "log4j.logger.kafka.authorizer.logger=INFO"))
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, configMap);
 
         ExternalLogging elKafka = new ExternalLoggingBuilder()
             .withNewValueFrom()
@@ -894,13 +895,13 @@ class LoggingChangeST extends AbstractST {
             .endValueFrom()
             .build();
 
-        LOGGER.info("Setting log level of kafka INFO");
+        LOGGER.info("Setting log level of Kafka INFO");
         // change to external logging
         KafkaResource.replaceKafkaResourceInSpecificNamespace(clusterName, k -> {
             k.getSpec().getKafka().setLogging(elKafka);
         }, namespaceName);
 
-        LOGGER.info("Waiting for dynamic change in the kafka pod");
+        LOGGER.info("Waiting for dynamic change in the Kafka Pod");
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> KafkaCmdClient.describeKafkaBrokerLoggersUsingPodCli(namespaceName, scraperPodName, KafkaResources.plainBootstrapAddress(clusterName), 0).contains("root=INFO"));
 
@@ -916,18 +917,19 @@ class LoggingChangeST extends AbstractST {
                 return correctLogging[0];
             });
 
-        assertThat("Kafka pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
+        assertThat("Kafka Pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
     }
 
     @ParallelNamespaceTest
     void testDynamicallySetUnknownKafkaLogger(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
-        final String scraperName = mapWithScraperNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
+        final String scraperName = testStorage.getScraperName();
 
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.kafkaStatefulSetName(clusterName));
 
-        resourceManager.createResource(extensionContext,
+        resourceManager.createResourceWithWait(extensionContext,
             KafkaTemplates.kafkaPersistent(clusterName, 3, 1).build(),
             ScraperTemplates.scraperPod(namespaceName, scraperName).build()
         );
@@ -949,11 +951,12 @@ class LoggingChangeST extends AbstractST {
 
     @ParallelNamespaceTest
     void testDynamicallySetUnknownKafkaLoggerValue(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.kafkaStatefulSetName(clusterName));
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1).build());
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1).build());
 
         Map<String, String> kafkaPods = PodUtils.podSnapshot(namespaceName, kafkaSelector);
 
@@ -965,14 +968,15 @@ class LoggingChangeST extends AbstractST {
         }, namespaceName);
 
         RollingUpdateUtils.waitForNoRollingUpdate(namespaceName, kafkaSelector, kafkaPods);
-        assertThat("Kafka pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
+        assertThat("Kafka Pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
     }
 
     @ParallelNamespaceTest
     void testDynamicallySetKafkaExternalLogging(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
-        final String scraperName = mapWithScraperNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
+        final String scraperName = testStorage.getScraperName();
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.kafkaStatefulSetName(clusterName));
 
         // this test changes dynamically unchangeable logging config and thus RU is expected
@@ -1001,7 +1005,8 @@ class LoggingChangeST extends AbstractST {
                         ))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, configMap);
+
         ExternalLogging el = new ExternalLoggingBuilder()
             .withNewValueFrom()
                 .withConfigMapKeyRef(
@@ -1013,10 +1018,10 @@ class LoggingChangeST extends AbstractST {
             .endValueFrom()
             .build();
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1)
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1)
             .editOrNewSpec()
                 .editKafka()
-                    .withExternalLogging(el)
+                    .withLogging(el)
                 .endKafka()
             .endSpec()
             .build(),
@@ -1051,9 +1056,9 @@ class LoggingChangeST extends AbstractST {
                         ))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMap).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(namespaceName, configMap);
         RollingUpdateUtils.waitForNoRollingUpdate(namespaceName, kafkaSelector, kafkaPods);
-        assertThat("Kafka pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
+        assertThat("Kafka Pod should not roll", RollingUpdateUtils.componentHasRolled(namespaceName, kafkaSelector, kafkaPods), is(false));
         TestUtils.waitFor("Verify logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> KafkaCmdClient.describeKafkaBrokerLoggersUsingPodCli(namespaceName, scraperPodName, KafkaResources.plainBootstrapAddress(clusterName), 0).contains("kafka.authorizer.logger=ERROR"));
 
@@ -1083,7 +1088,7 @@ class LoggingChangeST extends AbstractST {
                 ))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMap).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(namespaceName, configMap);
         RollingUpdateUtils.waitTillComponentHasRolled(namespaceName, kafkaSelector, kafkaPods);
 
         TestUtils.waitFor("Verify logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
@@ -1095,8 +1100,10 @@ class LoggingChangeST extends AbstractST {
     @Tag(MIRROR_MAKER2)
     @Tag(CONNECT_COMPONENTS)
     void testDynamicallySetMM2LoggingLevels(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
+        LabelSelector labelSelector = KafkaMirrorMaker2Resource.getLabelSelector(clusterName, KafkaMirrorMaker2Resources.deploymentName(clusterName));
 
         InlineLogging ilOff = new InlineLogging();
         Map<String, String> loggers = new HashMap<>();
@@ -1107,19 +1114,19 @@ class LoggingChangeST extends AbstractST {
 
         ilOff.setLoggers(loggers);
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-source", 1).build());
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-target", 1).build());
-        resourceManager.createResource(extensionContext,
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-source", 1).build());
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-target", 1).build());
+        resourceManager.createResourceWithWait(extensionContext,
             KafkaMirrorMaker2Templates.kafkaMirrorMaker2(clusterName, clusterName + "-target", clusterName + "-source", 1, false)
                 .editOrNewSpec()
-                    .withInlineLogging(ilOff)
+                    .withLogging(ilOff)
                 .endSpec()
                 .build());
 
         String kafkaMM2PodName = kubeClient().namespace(namespaceName).listPods(namespaceName, clusterName, Labels.STRIMZI_KIND_LABEL, KafkaMirrorMaker2.RESOURCE_KIND).get(0).getMetadata().getName();
         String mm2LogCheckCmd = "http://localhost:8083/admin/loggers/root";
 
-        Map<String, String> mm2Snapshot = DeploymentUtils.depSnapshot(namespaceName, KafkaMirrorMaker2Resources.deploymentName(clusterName));
+        Map<String, String> mm2Snapshot = PodUtils.podSnapshot(namespaceName, labelSelector);
 
         TestUtils.waitFor("log to be empty", Duration.ofMillis(100).toMillis(), Constants.SAFETY_RECONCILIATION_INTERVAL,
             () -> {
@@ -1167,7 +1174,7 @@ class LoggingChangeST extends AbstractST {
                 .withData(Collections.singletonMap("log4j.properties", log4jConfig))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(mm2LoggingMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, mm2LoggingMap);
 
         ExternalLogging mm2XternalLogging = new ExternalLoggingBuilder()
             .withNewValueFrom()
@@ -1180,7 +1187,7 @@ class LoggingChangeST extends AbstractST {
             .endValueFrom()
             .build();
 
-        LOGGER.info("Setting log level of MM2 to OFF");
+        LOGGER.info("Setting log level of MirrorMaker2 to OFF");
         // change to the external logging
         KafkaMirrorMaker2Resource.replaceKafkaMirrorMaker2ResourceInSpecificNamespace(clusterName, mm2 -> {
             mm2.getSpec().setLogging(mm2XternalLogging);
@@ -1196,17 +1203,20 @@ class LoggingChangeST extends AbstractST {
                 return mmLog != null && !mmLog.isEmpty() && DEFAULT_LOG4J_PATTERN.matcher(mmLog).find();
             });
 
-        assertThat("MirrorMaker2 pod should not roll", DeploymentUtils.depSnapshot(namespaceName, KafkaMirrorMaker2Resources.deploymentName(clusterName)), equalTo(mm2Snapshot));
+        assertThat("MirrorMaker2 pod should not roll", PodUtils.podSnapshot(namespaceName, labelSelector), equalTo(mm2Snapshot));
     }
 
     @ParallelNamespaceTest
     @Tag(ROLLING_UPDATE)
+    @Tag(MIRROR_MAKER2)
     void testMM2LoggingLevelsHierarchy(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String clusterName = testStorage.getClusterName();
+        LabelSelector labelSelector = KafkaMirrorMaker2Resource.getLabelSelector(clusterName, KafkaMirrorMaker2Resources.deploymentName(clusterName));
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-source", 1).build());
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-target", 1).build());
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-source", 1).build());
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(clusterName + "-target", 1).build());
 
         String log4jConfig =
                 "log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender\n" +
@@ -1231,7 +1241,7 @@ class LoggingChangeST extends AbstractST {
                 .withData(Collections.singletonMap("log4j.properties", log4jConfig))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(mm2LoggingMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, mm2LoggingMap);
 
         ExternalLogging mm2XternalLogging = new ExternalLoggingBuilder()
                 .withNewValueFrom()
@@ -1244,7 +1254,7 @@ class LoggingChangeST extends AbstractST {
                 .endValueFrom()
                 .build();
 
-        resourceManager.createResource(extensionContext,
+        resourceManager.createResourceWithWait(extensionContext,
             KafkaMirrorMaker2Templates.kafkaMirrorMaker2(clusterName, clusterName + "-target", clusterName + "-source", 1, false)
                 .editOrNewSpec()
                     .withLogging(mm2XternalLogging)
@@ -1253,7 +1263,7 @@ class LoggingChangeST extends AbstractST {
 
         String kafkaMM2PodName = kubeClient().namespace(namespaceName).listPods(namespaceName, clusterName, Labels.STRIMZI_KIND_LABEL, KafkaMirrorMaker2.RESOURCE_KIND).get(0).getMetadata().getName();
 
-        Map<String, String> mm2Snapshot = DeploymentUtils.depSnapshot(namespaceName, KafkaMirrorMaker2Resources.deploymentName(clusterName));
+        Map<String, String> mm2Snapshot = PodUtils.podSnapshot(namespaceName, labelSelector);
 
         LOGGER.info("Waiting for log4j.properties will contain desired settings");
         TestUtils.waitFor("Logger init levels", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
@@ -1280,7 +1290,7 @@ class LoggingChangeST extends AbstractST {
                 .withData(Collections.singletonMap("log4j.properties", updatedLog4jConfig))
                 .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(mm2LoggingMap).createOrReplace();
+        kubeClient().updateConfigMapInNamespace(namespaceName, mm2LoggingMap);
 
         TestUtils.waitFor("Logger change", Constants.GLOBAL_POLL_INTERVAL, Constants.GLOBAL_TIMEOUT,
             () -> cmdKubeClient().namespace(namespaceName).execInPod(kafkaMM2PodName, "curl", "http://localhost:8083/admin/loggers/root").out().contains("INFO")
@@ -1290,14 +1300,15 @@ class LoggingChangeST extends AbstractST {
                     && cmdKubeClient().namespace(namespaceName).execInPod(kafkaMM2PodName, "curl", "http://localhost:8083/admin/loggers/org.apache.kafka.connect.runtime.WorkerTask").out().contains("INFO")
         );
 
-        assertThat("MirrorMaker2 pod should not roll", DeploymentUtils.depSnapshot(namespaceName, KafkaMirrorMaker2Resources.deploymentName(clusterName)), equalTo(mm2Snapshot));
+        assertThat("MirrorMaker2 pod should not roll", PodUtils.podSnapshot(namespaceName, labelSelector), equalTo(mm2Snapshot));
     }
 
     @ParallelNamespaceTest
     void testNotExistingCMSetsDefaultLogging(ExtensionContext extensionContext) {
-        final String namespaceName = StUtils.getNamespaceBasedOnRbac(namespace, extensionContext);
-        final String defaultProps = TestUtils.getFileAsString(TestUtils.USER_PATH + "/../cluster-operator/src/main/resources/kafkaDefaultLoggingProperties");
-        final String clusterName = mapWithClusterNames.get(extensionContext.getDisplayName());
+        final TestStorage testStorage = storageMap.get(extensionContext);
+        final String namespaceName = StUtils.getNamespaceBasedOnRbac(Environment.TEST_SUITE_NAMESPACE, extensionContext);
+        final String defaultProps = TestUtils.getFileAsString(TestUtils.USER_PATH + "/../cluster-operator/src/main/resources/default-logging/KafkaCluster.properties");
+        final String clusterName = testStorage.getClusterName();
         final LabelSelector kafkaSelector = KafkaResource.getLabelSelector(clusterName, KafkaResources.kafkaStatefulSetName(clusterName));
 
         String cmData = "log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender\n" +
@@ -1320,13 +1331,13 @@ class LoggingChangeST extends AbstractST {
             .withData(Collections.singletonMap("log4j.properties", cmData))
             .build();
 
-        kubeClient().getClient().configMaps().inNamespace(namespaceName).resource(configMap).createOrReplace();
+        kubeClient().createConfigMapInNamespace(namespaceName, configMap);
 
         LOGGER.info("Deploying Kafka with custom logging");
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1)
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaPersistent(clusterName, 3, 1)
             .editOrNewSpec()
                 .editKafka()
-                .withExternalLogging(new ExternalLoggingBuilder()
+                .withLogging(new ExternalLoggingBuilder()
                     .withNewValueFrom()
                         .withConfigMapKeyRef(new ConfigMapKeySelectorBuilder()
                                 .withKey("log4j.properties")
@@ -1342,7 +1353,7 @@ class LoggingChangeST extends AbstractST {
         String kafkaSsName = KafkaResources.kafkaStatefulSetName(clusterName);
         Map<String, String> kafkaPods = PodUtils.podSnapshot(namespaceName, kafkaSelector);
 
-        String log4jFile =  cmdKubeClient().namespace(namespaceName).execInPodContainer(Level.DEBUG, KafkaResources.kafkaPodName(clusterName, 0),
+        String log4jFile =  cmdKubeClient().namespace(namespaceName).execInPodContainer(Level.DEBUG, KafkaResource.getKafkaPodName(clusterName, 0),
             "kafka", "/bin/bash", "-c", "cat custom-config/log4j.properties").out();
         assertTrue(log4jFile.contains(cmData));
 
@@ -1361,16 +1372,16 @@ class LoggingChangeST extends AbstractST {
         RollingUpdateUtils.waitForNoRollingUpdate(namespaceName, kafkaSelector, kafkaPods);
 
         LOGGER.info("Checking that log4j.properties in custom-config isn't empty and configuration is default");
-        log4jFile = cmdKubeClient().namespace(namespaceName).execInPodContainer(Level.DEBUG, KafkaResources.kafkaPodName(clusterName, 0),
+        log4jFile = cmdKubeClient().namespace(namespaceName).execInPodContainer(Level.DEBUG, KafkaResource.getKafkaPodName(clusterName, 0),
             "kafka", "/bin/bash", "-c", "cat custom-config/log4j.properties").out();
 
         assertFalse(log4jFile.isEmpty());
         assertTrue(log4jFile.contains(cmData));
         assertFalse(log4jFile.contains(defaultProps));
 
-        LOGGER.info("Checking if Kafka:{} contains error about non-existing CM", clusterName);
-        Condition condition = KafkaResource.kafkaClient().inNamespace(namespaceName).withName(clusterName).get().getStatus().getConditions().get(0);
-        assertThat(condition.getType(), is(CustomResourceStatus.NotReady.toString()));
+        LOGGER.info("Checking if Kafka: {} contains error about non-existing CM", clusterName);
+        Condition condition = KafkaResource.kafkaClient().inNamespace(namespaceName).withName(clusterName).get().getStatus().getConditions().stream().filter(con -> CustomResourceStatus.NotReady.toString().equals(con.getType())).findFirst().orElse(null);
+        assertThat(condition, is(notNullValue()));
         assertTrue(condition.getMessage().matches("ConfigMap " + nonExistingCmName + " with external logging configuration does not exist .*"));
     }
 
@@ -1378,9 +1389,9 @@ class LoggingChangeST extends AbstractST {
     void testLoggingHierarchy(ExtensionContext extensionContext) {
         TestStorage testStorage = new TestStorage(extensionContext);
 
-        resourceManager.createResource(extensionContext, KafkaTemplates.kafkaEphemeral(testStorage.getClusterName(), 3).build());
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(testStorage.getClusterName(), 3).build());
 
-        KafkaConnect connect = KafkaConnectTemplates.kafkaConnectWithFilePlugin(testStorage.getNamespaceName(), testStorage.getClusterName(), 1)
+        KafkaConnect connect = KafkaConnectTemplates.kafkaConnectWithFilePlugin(testStorage.getClusterName(), testStorage.getNamespaceName(), 1)
             .editMetadata()
                 .addToAnnotations(Annotations.STRIMZI_IO_USE_CONNECTOR_RESOURCES, "true")
             .endMetadata()
@@ -1392,11 +1403,15 @@ class LoggingChangeST extends AbstractST {
             .endSpec()
             .build();
 
-        resourceManager.createResource(extensionContext,
+        resourceManager.createResourceWithWait(extensionContext,
             connect,
             ScraperTemplates.scraperPod(testStorage.getNamespaceName(), testStorage.getScraperName()).build(),
             KafkaConnectorTemplates.defaultKafkaConnector(testStorage.getClusterName(), testStorage.getClusterName(), 1).build()
         );
+
+        LOGGER.info("Deploying network policies for KafkaConnect");
+        NetworkPolicyResource.deployNetworkPolicyForResource(extensionContext, connect, KafkaConnectResources.deploymentName(testStorage.getClusterName()));
+
 
         String connectorClassName = "org.apache.kafka.connect.file.FileStreamSourceConnector";
         final String scraperPodName = PodUtils.getPodsByPrefixInNameWithDynamicWait(testStorage.getNamespaceName(), testStorage.getScraperName()).get(0).getMetadata().getName();
@@ -1413,7 +1428,7 @@ class LoggingChangeST extends AbstractST {
                 "http://" + KafkaConnectResources.serviceName(testStorage.getClusterName()) + ":8083/admin/loggers/" + connectorClassName).out().contains("ERROR")
         );
 
-        LOGGER.info("Restarting Kafka connector {} with class name {}", testStorage.getClusterName(), connectorClassName);
+        LOGGER.info("Restarting KafkaConnector {} with class name {}", testStorage.getClusterName(), connectorClassName);
         cmdKubeClient().namespace(testStorage.getNamespaceName()).execInPod(scraperPodName,
             "curl", "-X", "POST",
             "http://" + KafkaConnectResources.serviceName(testStorage.getClusterName()) + ":8083/connectors/" + testStorage.getClusterName() + "/restart");
@@ -1443,5 +1458,110 @@ class LoggingChangeST extends AbstractST {
         LOGGER.info("Checking if KafkaConnector {} doesn't inherit logger from KafkaConnect", connectorClassName);
 
         KafkaConnectorUtils.loggerStabilityWait(testStorage.getNamespaceName(), testStorage.getClusterName(), scraperPodName, "ERROR", connectorClassName);
+    }
+
+    /**
+     * @description This test case check that changing Logging configuration from internal to external triggers Rolling Update.
+     *
+     * @steps
+     *  1. - Deploy Kafka Cluster, without any logging related configuration
+     *     - Cluster is deployed
+     *  2. - Modify Kafka by changing specification of logging to new external value
+     *     - Change in logging specification triggers Rolling Update
+     *  3. - Modify Kafka by changing specification of logging to new logging format
+     *     - Change in logging specification triggers Rolling Update
+     *
+     * @usecase
+     *  - logging
+     *  - rolling-update
+     */
+    @ParallelNamespaceTest
+    @Tag(ROLLING_UPDATE)
+    void testChangingInternalToExternalLoggingTriggerRollingUpdate(ExtensionContext extensionContext) {
+        final TestStorage testStorage = storageMap.get(extensionContext);
+
+        // EO dynamic logging is tested in io.strimzi.systemtest.log.LoggingChangeST.testDynamicallySetEOloggingLevels
+        resourceManager.createResourceWithWait(extensionContext, KafkaTemplates.kafkaEphemeral(testStorage.getClusterName(), 3, 3).build());
+
+        Map<String, String> kafkaPods = PodUtils.podSnapshot(testStorage.getNamespaceName(), testStorage.getKafkaSelector());
+        Map<String, String> zkPods = null;
+        if (!Environment.isKRaftModeEnabled()) {
+            zkPods = PodUtils.podSnapshot(testStorage.getNamespaceName(), testStorage.getZookeeperSelector());
+        }
+
+        final String loggersConfig = "log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender\n" +
+            "log4j.appender.CONSOLE.layout=org.apache.log4j.PatternLayout\n" +
+            "log4j.appender.CONSOLE.layout.ConversionPattern=%d{ISO8601} %p %m (%c) [%t]\n" +
+            "kafka.root.logger.level=INFO\n" +
+            "log4j.rootLogger=${kafka.root.logger.level}, CONSOLE\n" +
+            "log4j.logger.org.I0Itec.zkclient.ZkClient=INFO\n" +
+            "log4j.logger.org.apache.zookeeper=INFO\n" +
+            "log4j.logger.kafka=INFO\n" +
+            "log4j.logger.org.apache.kafka=INFO\n" +
+            "log4j.logger.kafka.request.logger=WARN, CONSOLE\n" +
+            "log4j.logger.kafka.network.Processor=INFO\n" +
+            "log4j.logger.kafka.server.KafkaApis=INFO\n" +
+            "log4j.logger.kafka.network.RequestChannel$=INFO\n" +
+            "log4j.logger.kafka.controller=INFO\n" +
+            "log4j.logger.kafka.log.LogCleaner=INFO\n" +
+            "log4j.logger.state.change.logger=TRACE\n" +
+            "log4j.logger.kafka.authorizer.logger=INFO";
+
+        final String configMapLoggersName = "loggers-config-map";
+        ConfigMap configMapLoggers = new ConfigMapBuilder()
+            .withNewMetadata()
+                .withNamespace(testStorage.getNamespaceName())
+                .withName(configMapLoggersName)
+            .endMetadata()
+            .addToData("log4j-custom.properties", loggersConfig)
+            .build();
+
+        ConfigMapKeySelector log4jLoggimgCMselector = new ConfigMapKeySelectorBuilder()
+            .withName(configMapLoggersName)
+            .withKey("log4j-custom.properties")
+            .build();
+
+        kubeClient().createConfigMapInNamespace(testStorage.getNamespaceName(), configMapLoggers);
+
+        KafkaResource.replaceKafkaResourceInSpecificNamespace(testStorage.getClusterName(), kafka -> {
+            kafka.getSpec().getKafka().setLogging(new ExternalLoggingBuilder()
+                .withNewValueFrom()
+                .withConfigMapKeyRef(log4jLoggimgCMselector)
+                .endValueFrom()
+                .build());
+            if (!Environment.isKRaftModeEnabled()) {
+                kafka.getSpec().getZookeeper().setLogging(new ExternalLoggingBuilder()
+                    .withNewValueFrom()
+                    .withConfigMapKeyRef(log4jLoggimgCMselector)
+                    .endValueFrom()
+                    .build());
+            }
+        }, testStorage.getNamespaceName());
+
+        if (!Environment.isKRaftModeEnabled()) {
+            LOGGER.info("Waiting for Zookeeper pods to roll after change in logging");
+            zkPods = RollingUpdateUtils.waitTillComponentHasRolledAndPodsReady(testStorage.getNamespaceName(), testStorage.getZookeeperSelector(), 3, zkPods);
+        }
+
+        LOGGER.info("Waiting for Kafka pods to roll after change in logging");
+        kafkaPods = RollingUpdateUtils.waitTillComponentHasRolledAndPodsReady(testStorage.getNamespaceName(), testStorage.getKafkaSelector(), 3, kafkaPods);
+
+        configMapLoggers.getData().put("log4j-custom.properties", loggersConfig.replace("%p %m (%c) [%t]", "%p %m (%c) [%t]%n"));
+        kubeClient().updateConfigMapInNamespace(testStorage.getNamespaceName(), configMapLoggers);
+
+        if (!Environment.isKRaftModeEnabled()) {
+            LOGGER.info("Waiting for Zookeeper pods to roll after change in logging properties config map");
+            RollingUpdateUtils.waitTillComponentHasRolledAndPodsReady(testStorage.getNamespaceName(), testStorage.getZookeeperSelector(), 3, zkPods);
+        }
+        LOGGER.info("Waiting for Kafka pods to roll after change in logging properties config map");
+        RollingUpdateUtils.waitTillComponentHasRolledAndPodsReady(testStorage.getNamespaceName(), testStorage.getKafkaSelector(), 3, kafkaPods);
+    }
+
+    @BeforeAll
+    void setup(ExtensionContext extensionContext) {
+        this.clusterOperator = this.clusterOperator
+                .defaultInstallation(extensionContext)
+                .createInstallation()
+                .runInstallation();
     }
 }

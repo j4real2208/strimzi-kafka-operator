@@ -54,7 +54,7 @@ You can specify optimization goals in the following configuration:
 
 [NOTE]
 ====
-Resource distribution goals are subject to xref:property-cruise-control-broker-capacity-reference[capacity limits] on broker resources.
+Resource distribution goals are subject to link:{BookURLConfiguring}#property-cruise-control-broker-capacity-reference[capacity limits^] on broker resources.
 ====
 
 [[hard-soft-goals]]
@@ -74,7 +74,7 @@ Cruise Control will ignore this goal if doing so enables all the configured hard
 In Cruise Control, the following xref:main-goals[main optimization goals] are preset as hard goals:
 
 [source]
-RackAwareGoal; MinTopicLeadersPerBrokerGoal; ReplicaCapacityGoal; DiskCapacityGoal; NetworkInboundCapacityGoal; NetworkOutboundCapacityGoal; CpuCapacityGoal
+RackAwareGoal; ReplicaCapacityGoal; DiskCapacityGoal; NetworkInboundCapacityGoal; NetworkOutboundCapacityGoal; CpuCapacityGoal
 
 You configure hard goals in the Cruise Control deployment configuration, by editing the `hard.goals` property in `Kafka.spec.cruiseControl.config`.
 
@@ -102,6 +102,10 @@ spec:
       inboundNetwork: 10000KB/s
       outboundNetwork: 10000KB/s
     config:
+      # Note that `default.goals` (superset) must also include all `hard.goals` (subset)
+      default.goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal
       hard.goals: >
         com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal,
         com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal
@@ -122,7 +126,7 @@ Goals that are not listed in the main optimization goals are not available for u
 Unless you change the Cruise Control xref:proc-configuring-deploying-cruise-control-{context}[deployment configuration], Strimzi will inherit the following main optimization goals from Cruise Control, in descending priority order:
 
 [source]
-RackAwareGoal; ReplicaCapacityGoal; DiskCapacityGoal; NetworkInboundCapacityGoal; NetworkOutboundCapacityGoal; CpuCapacityGoal; ReplicaDistributionGoal; PotentialNwOutGoal; DiskUsageDistributionGoal; NetworkInboundUsageDistributionGoal; NetworkOutboundUsageDistributionGoal; CpuUsageDistributionGoal; TopicReplicaDistributionGoal; LeaderReplicaDistributionGoal; LeaderBytesInDistributionGoal; PreferredLeaderElectionGoal
+RackAwareGoal; MinTopicLeadersPerBrokerGoal; ReplicaCapacityGoal; DiskCapacityGoal; NetworkInboundCapacityGoal; NetworkOutboundCapacityGoal; CpuCapacityGoal; ReplicaDistributionGoal; PotentialNwOutGoal; DiskUsageDistributionGoal; NetworkInboundUsageDistributionGoal; NetworkOutboundUsageDistributionGoal; CpuUsageDistributionGoal; TopicReplicaDistributionGoal; LeaderReplicaDistributionGoal; LeaderBytesInDistributionGoal; PreferredLeaderElectionGoal
 
 Some of these goals are preset as xref:hard-soft-goals[hard goals].
 
@@ -134,7 +138,7 @@ You configure main optimization goals, if necessary, in the Cruise Control deplo
 
 * If you need to modify the inherited main optimization goals, specify a list of goals, in descending priority order, in the `goals` configuration option.
 
-NOTE: If you change the inherited main optimization goals, you must ensure that the hard goals, if configured in the `hard.goals` property in `Kafka.spec.cruiseControl.config`, are a subset of the main optimization goals that you configured. Otherwise, errors will occur when generating optimization proposals.
+NOTE: To avoid errors when generating optimization proposals, make sure that any changes you make to the `goals` or `default.goals` in `Kafka.spec.cruiseControl.config` include all of the hard goals specified for the `hard.goals` property. To clarify, the hard goals must also be specified (as a subset) for the main optimization goals and default goals.
 
 [[default-goals]]
 == Default optimization goals
@@ -173,10 +177,13 @@ spec:
       inboundNetwork: 10000KB/s
       outboundNetwork: 10000KB/s
     config:
+      # Note that `default.goals` (superset) must also include all `hard.goals` (subset)
       default.goals: >
         com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal,
         com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal,
         com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal
+      hard.goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal
       # ...
 ----
 

@@ -10,7 +10,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
-import io.strimzi.operator.cluster.KafkaUpgradeException;
+import io.strimzi.operator.common.model.InvalidResourceException;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -45,7 +45,7 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
 
         YAMLMapper mapper = new YAMLMapper();
 
-        List<KafkaVersion> kafkaVersions = mapper.readValue(reader, new TypeReference<List<KafkaVersion>>() { });
+        List<KafkaVersion> kafkaVersions = mapper.readValue(reader, new TypeReference<>() { });
 
         KafkaVersion defaultVersion = null;
 
@@ -73,8 +73,11 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
         }
     }
 
+    /**
+     * Lookup class for looking-up Kafka versions and the container images belonging to them
+     */
     public static class Lookup {
-        public static final String KAFKA_VERSIONS_RESOURCE = "kafka-versions.yaml";
+        private static final String KAFKA_VERSIONS_RESOURCE = "kafka-versions.yaml";
         private final Map<String, KafkaVersion> map;
         private final KafkaVersion defaultVersion;
         private final Map<String, String> kafkaImages;
@@ -82,6 +85,14 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
         private final Map<String, String> kafkaMirrorMakerImages;
         private final Map<String, String> kafkaMirrorMaker2Images;
 
+        /**
+         * Constructor
+         *
+         * @param kafkaImages               Map with container images for various Kafka versions to be used for Kafka brokers and ZooKeeper
+         * @param kafkaConnectImages        Map with container images for various Kafka versions to be used for Kafka Connect
+         * @param kafkaMirrorMakerImages    Map with container images for various Kafka versions to be used for Kafka Mirror Maker
+         * @param kafkaMirrorMaker2Images   Map with container images for various Kafka versions to be used for Kafka Mirror Maker 2
+         */
         public Lookup(Map<String, String> kafkaImages,
                       Map<String, String> kafkaConnectImages,
                       Map<String, String> kafkaMirrorMakerImages,
@@ -109,6 +120,9 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
             this.kafkaMirrorMaker2Images = kafkaMirrorMaker2Images;
         }
 
+        /**
+         * @return  The default Kafka version
+         */
         public KafkaVersion defaultVersion() {
             return defaultVersion;
         }
@@ -144,7 +158,7 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
         }
 
         /**
-         * Find the version from the given version string. This method looks only through suported versions and is used
+         * Find the version from the given version string. This method looks only through supported versions and is used
          * to validate the versions used in custom resources.
          *
          * UnsupportedKafkaVersionException is thrown if the version passed as argument is not found or is not supported.
@@ -170,14 +184,20 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
             return result;
         }
 
-        public Set<String> allVersions() {
-            return new TreeSet<>(map.keySet());
-        }
-
+        /**
+         * @return  Set of supported Kafka versions
+         */
         public Set<String> supportedVersions() {
-            return new TreeSet<>(map.keySet().stream().filter(version -> map.get(version).isSupported).collect(Collectors.toSet()));
+            return map.keySet().stream().filter(version -> map.get(version).isSupported).collect(Collectors.toCollection(TreeSet::new));
         }
 
+        /**
+         * Finds Kafka versions which support some feature
+         *
+         * @param feature   Feature which we want to be supported
+         *
+         * @return  Set of Kafka versions which support a particular feature
+         */
         public Set<String> supportedVersionsForFeature(String feature) {
             return map.entrySet().stream()
                     .filter(version -> version.getValue().isSupported)
@@ -193,12 +213,12 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
                 if (crVersion == null) {
                     image = images.get(defaultVersion().version());
                     if (image == null) {
-                        throw new NoImageException("No image for default version " + defaultVersion() + " in " + images.toString());
+                        throw new NoImageException("No image for default version " + defaultVersion() + " in " + images);
                     }
                 } else {
                     image = images.get(crVersion);
                     if (image == null) {
-                        throw new NoImageException("No image for version " + crVersion + " in " + images.toString());
+                        throw new NoImageException("No image for version " + crVersion + " in " + images);
                     }
                 }
             } else {
@@ -317,7 +337,7 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
         }
 
        /**
-         * The Kafka MirrorMaker 2.0 image to use for a Kafka MirrorMaker 2.0 cluster.
+         * The Kafka MirrorMaker 2 image to use for a Kafka MirrorMaker 2 cluster.
          * @param image The image given in the CR.
          * @param version The version given in the CR.
          * @return The image to use.
@@ -373,11 +393,11 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
      * Thrown to indicate that given Kafka version is not valid or not supported.
      */
     public static class UnsupportedKafkaVersionException extends InvalidResourceException {
-
-        public UnsupportedKafkaVersionException() {
-            super();
-        }
-
+        /**
+         * Constructor
+         *
+         * @param s     The error message
+         */
         public UnsupportedKafkaVersionException(String s) {
             super(s);
         }
@@ -391,6 +411,17 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
     private final boolean isSupported;
     private final String unsupportedFeatures;
 
+    /**
+     * Class describing a Kafka version. This is used to deserialize the YAML file with the Kafka versions
+     *
+     * @param version               Kafka version
+     * @param protocolVersion       Inter-broker protocol version
+     * @param messageVersion        Log message format version
+     * @param zookeeperVersion      ZooKeeper version
+     * @param isDefault             Flag indicating if this Kafka version is default
+     * @param isSupported           Flag indicating if this Kafka version is supported by this operator version
+     * @param unsupportedFeatures   Unsupported features
+     */
     @JsonCreator
     public KafkaVersion(@JsonProperty("version") String version,
                         @JsonProperty("protocol") String protocolVersion,
@@ -422,30 +453,51 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
                 '}';
     }
 
+    /**
+     * @return  Kafka version
+     */
     public String version() {
         return version;
     }
 
+    /**
+     * @return  Inter-broker protocol version
+     */
     public String protocolVersion() {
         return protocolVersion;
     }
 
+    /**
+     * @return  Log message format version
+     */
     public String messageVersion() {
         return messageVersion;
     }
 
+    /**
+     * @return  ZooKeeper version
+     */
     public String zookeeperVersion() {
         return zookeeperVersion;
     }
 
+    /**
+     * @return  True if this Kafka version is the default. False otherwise.
+     */
     public boolean isDefault() {
         return isDefault;
     }
 
+    /**
+     * @return  True if this Kafka version is supported. False otherwise.
+     */
     public boolean isSupported() {
         return isSupported;
     }
 
+    /**
+     * @return  Unsupported Kafka versions
+     */
     public String unsupportedFeatures() {
         return unsupportedFeatures;
     }
@@ -453,16 +505,6 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
     @Override
     public int compareTo(KafkaVersion o) {
         return compareDottedVersions(this.version, o.version);
-    }
-
-    /** Compares this version to a supplied version string.
-     * @param version the version string to be compared
-     * @return Zero if the supplied versions matches this version;
-     * -1 if this version is less than the supplied version;
-     * +1 if this version is greater than the supplied version.
-     */
-    public int compareVersion(String version) {
-        return compareDottedVersions(this.version, version);
     }
 
     /**
@@ -479,12 +521,9 @@ public class KafkaVersion implements Comparable<KafkaVersion> {
         for (int i = 0; i < Math.min(components.length, otherComponents.length); i++) {
             int x = Integer.parseInt(components[i]);
             int y = Integer.parseInt(otherComponents[i]);
-            if (x == y) {
-                continue;
-            } else if (x < y) {
-                return -1;
-            } else {
-                return 1;
+            int compared = Integer.compare(x, y);
+            if (compared != 0) {
+                return compared;
             }
         }
         // mismatch was not found, but the versions are of different length, e.g. 2.8 and 2.8.0

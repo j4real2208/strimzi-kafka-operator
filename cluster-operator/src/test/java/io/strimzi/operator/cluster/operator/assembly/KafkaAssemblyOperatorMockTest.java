@@ -22,41 +22,43 @@ import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBui
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.api.kafka.model.storage.PersistentClaimStorage;
 import io.strimzi.api.kafka.model.storage.Storage;
-import io.strimzi.operator.cluster.model.KafkaVersion;
-import io.strimzi.platform.KubernetesVersion;
-import io.strimzi.operator.PlatformFeaturesAvailability;
-import io.strimzi.operator.cluster.ClusterOperator;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
+import io.strimzi.operator.common.model.Ca;
+import io.strimzi.operator.cluster.model.CertUtils;
+import io.strimzi.operator.cluster.model.ClusterCa;
+import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.cluster.model.PodSetUtils;
-import io.strimzi.operator.cluster.model.Ca;
-import io.strimzi.operator.cluster.model.AbstractModel;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.common.PasswordGenerator;
+import io.strimzi.operator.common.Annotations;
+import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.MockCertManager;
+import io.strimzi.platform.KubernetesVersion;
 import io.strimzi.test.mockkube2.MockKube2;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.junit5.Checkpoint;
 import io.vertx.junit5.VertxExtension;
 import io.vertx.junit5.VertxTestContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 
-import java.util.List;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -83,8 +85,7 @@ public class KafkaAssemblyOperatorMockTest {
 
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
     private static Vertx vertx;
-
-    private final KubernetesVersion kubernetesVersion = KubernetesVersion.V1_16;
+    private static WorkerExecutor sharedWorkerExecutor;
 
     private static final int KAFKA_REPLICAS = 3;
     private Storage kafkaStorage;
@@ -102,10 +103,12 @@ public class KafkaAssemblyOperatorMockTest {
     @BeforeAll
     public static void before() {
         vertx = Vertx.vertx();
+        sharedWorkerExecutor = vertx.createSharedWorkerExecutor("kubernetes-ops-pool");
     }
 
     @AfterAll
     public static void after() {
+        sharedWorkerExecutor.close();
         vertx.close();
         ResourceUtils.cleanUpTemporaryTLSFiles();
     }
@@ -164,12 +167,12 @@ public class KafkaAssemblyOperatorMockTest {
                 .build();
         mockKube.start();
 
-        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, kubernetesVersion);
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION);
         supplier = supplierWithMocks();
-        podSetController = new StrimziPodSetController(NAMESPACE, Labels.EMPTY, supplier.kafkaOperator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, ClusterOperatorConfig.DEFAULT_POD_SET_CONTROLLER_WORK_QUEUE_SIZE);
+        podSetController = new StrimziPodSetController(NAMESPACE, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         podSetController.start();
 
-        ClusterOperatorConfig config = ResourceUtils.dummyClusterOperatorConfig(VERSIONS, ClusterOperatorConfig.DEFAULT_OPERATION_TIMEOUT_MS);
+        ClusterOperatorConfig config = ResourceUtils.dummyClusterOperatorConfig(VERSIONS);
         operator = new KafkaAssemblyOperator(vertx, pfa, new MockCertManager(),
                 new PasswordGenerator(10, "a", "a"), supplier, config);
     }
@@ -177,7 +180,7 @@ public class KafkaAssemblyOperatorMockTest {
     private ResourceOperatorSupplier supplierWithMocks() {
         return new ResourceOperatorSupplier(vertx, client, ResourceUtils.zookeeperLeaderFinder(vertx, client),
                 ResourceUtils.adminClientProvider(), ResourceUtils.zookeeperScalerProvider(),
-                ResourceUtils.metricsProvider(), new PlatformFeaturesAvailability(false, kubernetesVersion), 2_000);
+                ResourceUtils.metricsProvider(), new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION), 2_000);
     }
 
 
@@ -191,11 +194,21 @@ public class KafkaAssemblyOperatorMockTest {
                 sps.getSpec().getPods().stream().map(PodSetUtils::mapToPod).forEach(pod -> {
                     assertThat(pod.getMetadata().getAnnotations(), hasEntry(Ca.ANNO_STRIMZI_IO_CLIENTS_CA_CERT_GENERATION, "0"));
                     assertThat(pod.getMetadata().getAnnotations(), hasEntry(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, "0"));
+                    assertThat(pod.getMetadata().getAnnotations(), hasEntry(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, "0"));
+                    var brokersSecret = client.secrets().inNamespace(NAMESPACE).withName(KafkaResources.kafkaSecretName(CLUSTER_NAME)).get();
+                    assertThat(pod.getMetadata().getAnnotations(), hasEntry(Annotations.ANNO_STRIMZI_SERVER_CERT_HASH,
+                            CertUtils.getCertificateThumbprint(brokersSecret, ClusterCa.secretEntryNameForPod(pod.getMetadata().getName(), Ca.SecretEntry.CRT))
+                    ));
                 });
 
                 StrimziPodSet zkSps = supplier.strimziPodSetOperator.client().inNamespace(NAMESPACE).withName(KafkaResources.zookeeperStatefulSetName(CLUSTER_NAME)).get();
                 zkSps.getSpec().getPods().stream().map(PodSetUtils::mapToPod).forEach(pod -> {
                     assertThat(pod.getMetadata().getAnnotations(), hasEntry(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_CERT_GENERATION, "0"));
+                    assertThat(pod.getMetadata().getAnnotations(), hasEntry(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, "0"));
+                    var zooKeeperSecret = client.secrets().inNamespace(NAMESPACE).withName(KafkaResources.zookeeperSecretName(CLUSTER_NAME)).get();
+                    assertThat(pod.getMetadata().getAnnotations(), hasEntry(Annotations.ANNO_STRIMZI_SERVER_CERT_HASH,
+                            CertUtils.getCertificateThumbprint(zooKeeperSecret, ClusterCa.secretEntryNameForPod(pod.getMetadata().getName(), Ca.SecretEntry.CRT))
+                    ));
                 });
                 assertThat(client.configMaps().inNamespace(NAMESPACE).withName(KafkaResources.zookeeperMetricsAndLogConfigMapName(CLUSTER_NAME)).get(), is(notNullValue()));
                 assertThat(client.secrets().inNamespace(NAMESPACE).withName(KafkaResources.clientsCaKeySecretName(CLUSTER_NAME)).get(), is(notNullValue()));
@@ -217,7 +230,7 @@ public class KafkaAssemblyOperatorMockTest {
     public void testReconcile(VertxTestContext context) {
         Checkpoint async = context.checkpoint();
         initialReconcile(context)
-            .onComplete(context.succeedingThenComplete())
+            .onComplete(context.succeeding(i -> { }))
             .compose(v -> operator.reconcile(new Reconciliation("test-trigger", Kafka.RESOURCE_KIND, NAMESPACE, CLUSTER_NAME)))
             .onComplete(context.succeeding(v -> async.flag()));
     }
@@ -230,7 +243,7 @@ public class KafkaAssemblyOperatorMockTest {
                 KafkaResources.clusterCaCertificateSecretName(CLUSTER_NAME),
                 KafkaResources.kafkaSecretName(CLUSTER_NAME),
                 KafkaResources.zookeeperSecretName(CLUSTER_NAME),
-                ClusterOperator.secretName(CLUSTER_NAME));
+                KafkaResources.secretName(CLUSTER_NAME));
     }
 
     /**
@@ -482,7 +495,7 @@ public class KafkaAssemblyOperatorMockTest {
                 for (String pvcName: kafkaPvcs.get()) {
                     assertThat(client.persistentVolumeClaims().inNamespace(NAMESPACE).withName(pvcName).get()
                                     .getMetadata().getAnnotations(),
-                            hasEntry(AbstractModel.ANNO_STRIMZI_IO_DELETE_CLAIM, String.valueOf(!originalKafkaDeleteClaim.get())));
+                            hasEntry(Annotations.ANNO_STRIMZI_IO_DELETE_CLAIM, String.valueOf(!originalKafkaDeleteClaim.get())));
                 }
                 kafkaAssembly(NAMESPACE, CLUSTER_NAME).withPropagationPolicy(DeletionPropagation.FOREGROUND).delete();
                 LOGGER.info("Reconciling again -> delete");
@@ -581,12 +594,5 @@ public class KafkaAssemblyOperatorMockTest {
                 // TODO assert no rolling update
                 async.flag();
             })));
-    }
-
-    @Test
-    public void testReconcileResumePartialRoll(VertxTestContext context) {
-        Checkpoint async = context.checkpoint();
-        initialReconcile(context)
-            .onComplete(v -> async.flag());
     }
 }

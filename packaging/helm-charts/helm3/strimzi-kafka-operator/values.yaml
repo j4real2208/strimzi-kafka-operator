@@ -17,6 +17,8 @@ image:
   repository: ""
   name: operator
   tag: ""
+  # imagePullSecrets:
+  #   - name: secretname
 logVolume: co-config-volume
 logConfigMap: strimzi-cluster-operator
 logConfiguration: ""
@@ -43,6 +45,23 @@ priorityClassName: ""
 
 podSecurityContext: {}
 securityContext: {}
+rbac:
+  create: yes
+serviceAccountCreate: yes
+serviceAccount: strimzi-cluster-operator
+
+leaderElection:
+  enable: true
+
+# If you are using the grafana dashboard sidecar,
+# you can import some default dashboards here
+dashboards:
+  enabled: false
+  namespace: ~
+  label: grafana_dashboard # this is the default value from the grafana chart
+  labelValue: "1" # this is the default value from the grafana chart
+  annotations: {}
+  extraLabels: {}
 
 # Docker images that operator uses to provision various components of Strimzi. To use your own registry prefix the
 # repository name with your registry URL.
@@ -94,19 +113,13 @@ kafkaBridge:
     registry: ""
     repository:
     name: kafka-bridge
-    tag: 0.22.1
+    tag: 0.26.1
 kafkaExporter:
   image:
     registry: ""
     repository: ""
     name: kafka
     tagPrefix: ""
-jmxTrans:
-  image:
-    registry: ""
-    repository: ""
-    name: jmxtrans
-    tag: ""
 kafkaMirrorMaker2:
   image:
     registry: ""
@@ -146,6 +159,9 @@ readinessProbe:
   periodSeconds: 30
 
 createGlobalResources: true
+# Create clusterroles that extend existing clusterroles to interact with strimzi crds
+# Ref: https://kubernetes.io/docs/reference/access-authn-authz/rbac/#aggregated-clusterroles
+createAggregateRoles: false
 # Override the exclude pattern for exclude some labels
 labelsExclusionPattern: ""
 # Controls whether Strimzi generates network policy resources (By default true)

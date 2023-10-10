@@ -4,12 +4,11 @@
  */
 package io.strimzi.operator.cluster.model;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Secret;
-import io.fabric8.kubernetes.api.model.SecurityContext;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.api.model.rbac.RoleBinding;
@@ -18,16 +17,16 @@ import io.fabric8.kubernetes.api.model.rbac.RoleRefBuilder;
 import io.fabric8.kubernetes.api.model.rbac.Subject;
 import io.fabric8.kubernetes.api.model.rbac.SubjectBuilder;
 import io.strimzi.api.kafka.model.CertificateAuthority;
-import io.strimzi.api.kafka.model.ContainerEnvVar;
 import io.strimzi.api.kafka.model.EntityUserOperatorSpec;
+import io.strimzi.api.kafka.model.JvmOptions;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaResources;
-import io.strimzi.api.kafka.model.Probe;
-import io.strimzi.api.kafka.model.ProbeBuilder;
+import io.strimzi.api.kafka.model.template.ResourceTemplate;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
+import io.strimzi.operator.cluster.model.logging.LoggingModel;
+import io.strimzi.operator.cluster.model.logging.SupportsLogging;
 import io.strimzi.operator.cluster.model.securityprofiles.ContainerSecurityProviderContextImpl;
 import io.strimzi.operator.common.Reconciliation;
-import io.strimzi.operator.common.model.OrderedProperties;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,35 +35,35 @@ import java.util.List;
 /**
  * Represents the User Operator deployment
  */
-public class EntityUserOperator extends AbstractModel {
-    protected static final String APPLICATION_NAME = "entity-user-operator";
+public class EntityUserOperator extends AbstractModel implements SupportsLogging {
+    protected static final String COMPONENT_TYPE = "entity-user-operator";
     
     protected static final String USER_OPERATOR_CONTAINER_NAME = "user-operator";
     private static final String NAME_SUFFIX = "-entity-user-operator";
     private static final String CERT_SECRET_KEY_NAME = "entity-operator";
+
+    private static final String LOG_AND_METRICS_CONFIG_VOLUME_NAME = "entity-user-operator-metrics-and-logging";
+    private static final String LOG_AND_METRICS_CONFIG_VOLUME_MOUNT = "/opt/user-operator/custom-config/";
 
     // Port configuration
     protected static final int HEALTHCHECK_PORT = 8081;
     protected static final String HEALTHCHECK_PORT_NAME = "healthcheck";
 
     // User Operator configuration keys
-    public static final String ENV_VAR_RESOURCE_LABELS = "STRIMZI_LABELS";
-    public static final String ENV_VAR_KAFKA_BOOTSTRAP_SERVERS = "STRIMZI_KAFKA_BOOTSTRAP_SERVERS";
-    public static final String ENV_VAR_WATCHED_NAMESPACE = "STRIMZI_NAMESPACE";
-    public static final String ENV_VAR_FULL_RECONCILIATION_INTERVAL_MS = "STRIMZI_FULL_RECONCILIATION_INTERVAL_MS";
-    public static final String ENV_VAR_CLIENTS_CA_CERT_SECRET_NAME = "STRIMZI_CA_CERT_NAME";
-    public static final String ENV_VAR_CLIENTS_CA_KEY_SECRET_NAME = "STRIMZI_CA_KEY_NAME";
-    public static final String ENV_VAR_CLIENTS_CA_NAMESPACE = "STRIMZI_CA_NAMESPACE";
-    public static final String ENV_VAR_CLIENTS_CA_VALIDITY = "STRIMZI_CA_VALIDITY";
-    public static final String ENV_VAR_CLIENTS_CA_RENEWAL = "STRIMZI_CA_RENEWAL";
-    public static final String ENV_VAR_CLUSTER_CA_CERT_SECRET_NAME = "STRIMZI_CLUSTER_CA_CERT_SECRET_NAME";
-    public static final String ENV_VAR_EO_KEY_SECRET_NAME = "STRIMZI_EO_KEY_SECRET_NAME";
-    public static final String ENV_VAR_SECRET_PREFIX = "STRIMZI_SECRET_PREFIX";
-    public static final String ENV_VAR_ACLS_ADMIN_API_SUPPORTED = "STRIMZI_ACLS_ADMIN_API_SUPPORTED";
-    public static final String ENV_VAR_KRAFT_ENABLED = "STRIMZI_KRAFT_ENABLED";
-    public static final String ENV_VAR_MAINTENANCE_TIME_WINDOWS = "STRIMZI_MAINTENANCE_TIME_WINDOWS";
-    public static final Probe DEFAULT_HEALTHCHECK_OPTIONS = new ProbeBuilder().withTimeoutSeconds(EntityUserOperatorSpec.DEFAULT_HEALTHCHECK_TIMEOUT)
-            .withInitialDelaySeconds(EntityUserOperatorSpec.DEFAULT_HEALTHCHECK_DELAY).build();
+    /* test */ static final String ENV_VAR_RESOURCE_LABELS = "STRIMZI_LABELS";
+    /* test */ static final String ENV_VAR_KAFKA_BOOTSTRAP_SERVERS = "STRIMZI_KAFKA_BOOTSTRAP_SERVERS";
+    /* test */ static final String ENV_VAR_WATCHED_NAMESPACE = "STRIMZI_NAMESPACE";
+    /* test */ static final String ENV_VAR_FULL_RECONCILIATION_INTERVAL_MS = "STRIMZI_FULL_RECONCILIATION_INTERVAL_MS";
+    /* test */ static final String ENV_VAR_CLIENTS_CA_CERT_SECRET_NAME = "STRIMZI_CA_CERT_NAME";
+    /* test */ static final String ENV_VAR_CLIENTS_CA_KEY_SECRET_NAME = "STRIMZI_CA_KEY_NAME";
+    /* test */ static final String ENV_VAR_CLIENTS_CA_NAMESPACE = "STRIMZI_CA_NAMESPACE";
+    /* test */ static final String ENV_VAR_CLIENTS_CA_VALIDITY = "STRIMZI_CA_VALIDITY";
+    /* test */ static final String ENV_VAR_CLIENTS_CA_RENEWAL = "STRIMZI_CA_RENEWAL";
+    /* test */ static final String ENV_VAR_CLUSTER_CA_CERT_SECRET_NAME = "STRIMZI_CLUSTER_CA_CERT_SECRET_NAME";
+    /* test */ static final String ENV_VAR_EO_KEY_SECRET_NAME = "STRIMZI_EO_KEY_SECRET_NAME";
+    /* test */ static final String ENV_VAR_SECRET_PREFIX = "STRIMZI_SECRET_PREFIX";
+    /* test */ static final String ENV_VAR_ACLS_ADMIN_API_SUPPORTED = "STRIMZI_ACLS_ADMIN_API_SUPPORTED";
+    /* test */ static final String ENV_VAR_MAINTENANCE_TIME_WINDOWS = "STRIMZI_MAINTENANCE_TIME_WINDOWS";
 
     // Volume name of the temporary volume used by the UO container
     // Because the container shares the pod with other containers, it needs to have unique name
@@ -77,23 +76,19 @@ public class EntityUserOperator extends AbstractModel {
     /* test */ long reconciliationIntervalMs;
     /* test */ int clientsCaValidityDays;
     /* test */ int clientsCaRenewalDays;
-    protected List<ContainerEnvVar> templateContainerEnvVars;
-    protected SecurityContext templateContainerSecurityContext;
+    private ResourceTemplate templateRoleBinding;
+
     private boolean aclsAdminApiSupported = false;
-    private boolean kraftEnabled = false;
     private List<String> maintenanceWindows;
+    private LoggingModel logging;
 
     /**
      * @param reconciliation   The reconciliation
      * @param resource Kubernetes resource with metadata containing the namespace and cluster name
+     * @param sharedEnvironmentProvider Shared environment provider
      */
-    protected EntityUserOperator(Reconciliation reconciliation, HasMetadata resource) {
-        super(reconciliation, resource, APPLICATION_NAME);
-        this.name = cluster + NAME_SUFFIX;
-        this.readinessPath = "/";
-        this.livenessProbeOptions = DEFAULT_HEALTHCHECK_OPTIONS;
-        this.livenessPath = "/";
-        this.readinessProbeOptions = DEFAULT_HEALTHCHECK_OPTIONS;
+    protected EntityUserOperator(Reconciliation reconciliation, HasMetadata resource, SharedEnvironmentProvider sharedEnvironmentProvider) {
+        super(reconciliation, resource, resource.getMetadata().getName() + NAME_SUFFIX, COMPONENT_TYPE, sharedEnvironmentProvider);
 
         // create a default configuration
         this.kafkaBootstrapServers = KafkaResources.bootstrapServiceName(cluster) + ":" + EntityUserOperatorSpec.DEFAULT_BOOTSTRAP_SERVERS_PORT;
@@ -101,9 +96,6 @@ public class EntityUserOperator extends AbstractModel {
         this.secretPrefix = EntityUserOperatorSpec.DEFAULT_SECRET_PREFIX;
         this.resourceLabels = ModelUtils.defaultResourceLabels(cluster);
 
-        this.ancillaryConfigMapName = KafkaResources.entityUserOperatorLoggingConfigMapName(cluster);
-        this.logAndMetricsConfigVolumeName = "entity-user-operator-metrics-and-logging";
-        this.logAndMetricsConfigMountPath = "/opt/user-operator/custom-config/";
         this.clientsCaValidityDays = CertificateAuthority.DEFAULT_CERTS_VALIDITY_DAYS;
         this.clientsCaRenewalDays = CertificateAuthority.DEFAULT_CERTS_RENEWAL_DAYS;
     }
@@ -112,19 +104,17 @@ public class EntityUserOperator extends AbstractModel {
      * Create an Entity User Operator from given desired resource. When User Operator (Or Entity Operator) are not
      * enabled, it returns null.
      *
-     * @param reconciliation The reconciliation
-     * @param kafkaAssembly desired resource with cluster configuration containing the Entity User Operator one
-     * @param kraftEnabled Indicates whether KRaft is enabled int he Kafka cluster
+     * @param reconciliation                The reconciliation
+     * @param kafkaAssembly                 Desired resource with cluster configuration containing the Entity User Operator one
+     * @param sharedEnvironmentProvider     Shared environment provider
      *
      * @return Entity User Operator instance, null if not configured
      */
-    public static EntityUserOperator fromCrd(Reconciliation reconciliation, Kafka kafkaAssembly, boolean kraftEnabled) {
+    public static EntityUserOperator fromCrd(Reconciliation reconciliation, Kafka kafkaAssembly, SharedEnvironmentProvider sharedEnvironmentProvider) {
         if (kafkaAssembly.getSpec().getEntityOperator() != null
                 && kafkaAssembly.getSpec().getEntityOperator().getUserOperator() != null) {
             EntityUserOperatorSpec userOperatorSpec = kafkaAssembly.getSpec().getEntityOperator().getUserOperator();
-            EntityUserOperator result = new EntityUserOperator(reconciliation, kafkaAssembly);
-
-            result.setOwnerReference(kafkaAssembly);
+            EntityUserOperator result = new EntityUserOperator(reconciliation, kafkaAssembly, sharedEnvironmentProvider);
 
             String image = userOperatorSpec.getImage();
             if (image == null) {
@@ -135,15 +125,15 @@ public class EntityUserOperator extends AbstractModel {
             result.watchedNamespace = userOperatorSpec.getWatchedNamespace() != null ? userOperatorSpec.getWatchedNamespace() : kafkaAssembly.getMetadata().getNamespace();
             result.reconciliationIntervalMs = userOperatorSpec.getReconciliationIntervalSeconds() * 1_000;
             result.secretPrefix = userOperatorSpec.getSecretPrefix() == null ? EntityUserOperatorSpec.DEFAULT_SECRET_PREFIX : userOperatorSpec.getSecretPrefix();
-            result.setLogging(userOperatorSpec.getLogging());
-            result.setGcLoggingEnabled(userOperatorSpec.getJvmOptions() == null ? DEFAULT_JVM_GC_LOGGING_ENABLED : userOperatorSpec.getJvmOptions().isGcLoggingEnabled());
-            result.setJvmOptions(userOperatorSpec.getJvmOptions());
-            result.setResources(userOperatorSpec.getResources());
-            if (userOperatorSpec.getReadinessProbe() != null) {
-                result.setReadinessProbe(userOperatorSpec.getReadinessProbe());
-            }
-            if (userOperatorSpec.getLivenessProbe() != null) {
-                result.setLivenessProbe(userOperatorSpec.getLivenessProbe());
+            result.logging = new LoggingModel(userOperatorSpec, result.getClass().getSimpleName(), true, false);
+            result.gcLoggingEnabled = userOperatorSpec.getJvmOptions() == null ? JvmOptions.DEFAULT_GC_LOGGING_ENABLED : userOperatorSpec.getJvmOptions().isGcLoggingEnabled();
+            result.jvmOptions = userOperatorSpec.getJvmOptions();
+            result.resources = userOperatorSpec.getResources();
+            result.readinessProbeOptions = ProbeUtils.extractReadinessProbeOptionsOrDefault(userOperatorSpec, EntityOperator.DEFAULT_HEALTHCHECK_OPTIONS);
+            result.livenessProbeOptions = ProbeUtils.extractLivenessProbeOptionsOrDefault(userOperatorSpec, EntityOperator.DEFAULT_HEALTHCHECK_OPTIONS);
+
+            if (kafkaAssembly.getSpec().getEntityOperator().getTemplate() != null)  {
+                result.templateRoleBinding = kafkaAssembly.getSpec().getEntityOperator().getTemplate().getUserOperatorRoleBinding();
             }
 
             if (kafkaAssembly.getSpec().getClientsCa() != null) {
@@ -162,8 +152,6 @@ public class EntityUserOperator extends AbstractModel {
                 result.aclsAdminApiSupported = kafkaAssembly.getSpec().getKafka().getAuthorization().supportsAdminApi();
             }
 
-            result.kraftEnabled = kraftEnabled;
-
             if (kafkaAssembly.getSpec().getMaintenanceTimeWindows() != null)    {
                 result.maintenanceWindows = kafkaAssembly.getSpec().getMaintenanceTimeWindows();
             }
@@ -174,92 +162,88 @@ public class EntityUserOperator extends AbstractModel {
         }
     }
 
-    @Override
-    protected List<Container> getContainers(ImagePullPolicy imagePullPolicy) {
-        return List.of(new ContainerBuilder()
-                .withName(USER_OPERATOR_CONTAINER_NAME)
-                .withImage(getImage())
-                .withArgs("/opt/strimzi/bin/user_operator_run.sh")
-                .withEnv(getEnvVars())
-                .withPorts(List.of(createContainerPort(HEALTHCHECK_PORT_NAME, HEALTHCHECK_PORT, "TCP")))
-                .withLivenessProbe(ProbeGenerator.httpProbe(livenessProbeOptions, livenessPath + "healthy", HEALTHCHECK_PORT_NAME))
-                .withReadinessProbe(ProbeGenerator.httpProbe(readinessProbeOptions, readinessPath + "ready", HEALTHCHECK_PORT_NAME))
-                .withResources(getResources())
-                .withVolumeMounts(getVolumeMounts())
-                .withImagePullPolicy(determineImagePullPolicy(imagePullPolicy, getImage()))
-                .withSecurityContext(securityProvider.entityUserOperatorContainerSecurityContext(new ContainerSecurityProviderContextImpl(templateContainerSecurityContext)))
-                .build());
+    protected Container createContainer(ImagePullPolicy imagePullPolicy) {
+        return ContainerUtils.createContainer(
+                USER_OPERATOR_CONTAINER_NAME,
+                image,
+                List.of("/opt/strimzi/bin/user_operator_run.sh"),
+                securityProvider.entityUserOperatorContainerSecurityContext(new ContainerSecurityProviderContextImpl(templateContainer)),
+                resources,
+                getEnvVars(),
+                List.of(ContainerUtils.createContainerPort(HEALTHCHECK_PORT_NAME, HEALTHCHECK_PORT)),
+                getVolumeMounts(),
+                ProbeUtils.httpProbe(livenessProbeOptions, "/healthy", HEALTHCHECK_PORT_NAME),
+                ProbeUtils.httpProbe(readinessProbeOptions, "/ready", HEALTHCHECK_PORT_NAME),
+                imagePullPolicy
+        );
     }
 
-    @Override
     protected List<EnvVar> getEnvVars() {
         List<EnvVar> varList = new ArrayList<>();
-        varList.add(buildEnvVar(ENV_VAR_KAFKA_BOOTSTRAP_SERVERS, kafkaBootstrapServers));
-        varList.add(buildEnvVar(ENV_VAR_WATCHED_NAMESPACE, watchedNamespace));
-        varList.add(buildEnvVar(ENV_VAR_RESOURCE_LABELS, resourceLabels));
-        varList.add(buildEnvVar(ENV_VAR_FULL_RECONCILIATION_INTERVAL_MS, Long.toString(reconciliationIntervalMs)));
-        varList.add(buildEnvVar(ENV_VAR_CLIENTS_CA_KEY_SECRET_NAME, KafkaResources.clientsCaKeySecretName(cluster)));
-        varList.add(buildEnvVar(ENV_VAR_CLIENTS_CA_CERT_SECRET_NAME, KafkaResources.clientsCaCertificateSecretName(cluster)));
-        varList.add(buildEnvVar(ENV_VAR_CLIENTS_CA_NAMESPACE, namespace));
-        varList.add(buildEnvVar(ENV_VAR_CLIENTS_CA_VALIDITY, Integer.toString(clientsCaValidityDays)));
-        varList.add(buildEnvVar(ENV_VAR_CLIENTS_CA_RENEWAL, Integer.toString(clientsCaRenewalDays)));
-        varList.add(buildEnvVar(ENV_VAR_CLUSTER_CA_CERT_SECRET_NAME, KafkaCluster.clusterCaCertSecretName(cluster)));
-        varList.add(buildEnvVar(ENV_VAR_EO_KEY_SECRET_NAME, KafkaResources.entityUserOperatorSecretName(cluster)));
-        varList.add(buildEnvVar(ENV_VAR_STRIMZI_GC_LOG_ENABLED, String.valueOf(gcLoggingEnabled)));
-        varList.add(buildEnvVar(ENV_VAR_SECRET_PREFIX, secretPrefix));
-        varList.add(buildEnvVar(ENV_VAR_ACLS_ADMIN_API_SUPPORTED, String.valueOf(aclsAdminApiSupported)));
-        varList.add(buildEnvVar(ENV_VAR_KRAFT_ENABLED, String.valueOf(kraftEnabled)));
-        ModelUtils.javaOptions(varList, getJvmOptions());
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_KAFKA_BOOTSTRAP_SERVERS, kafkaBootstrapServers));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_WATCHED_NAMESPACE, watchedNamespace));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_RESOURCE_LABELS, resourceLabels));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_FULL_RECONCILIATION_INTERVAL_MS, Long.toString(reconciliationIntervalMs)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLIENTS_CA_KEY_SECRET_NAME, KafkaResources.clientsCaKeySecretName(cluster)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLIENTS_CA_CERT_SECRET_NAME, KafkaResources.clientsCaCertificateSecretName(cluster)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLIENTS_CA_NAMESPACE, namespace));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLIENTS_CA_VALIDITY, Integer.toString(clientsCaValidityDays)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLIENTS_CA_RENEWAL, Integer.toString(clientsCaRenewalDays)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_CLUSTER_CA_CERT_SECRET_NAME, KafkaCluster.clusterCaCertSecretName(cluster)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_EO_KEY_SECRET_NAME, KafkaResources.entityUserOperatorSecretName(cluster)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_STRIMZI_GC_LOG_ENABLED, String.valueOf(gcLoggingEnabled)));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_SECRET_PREFIX, secretPrefix));
+        varList.add(ContainerUtils.createEnvVar(ENV_VAR_ACLS_ADMIN_API_SUPPORTED, String.valueOf(aclsAdminApiSupported)));
+        JvmOptionUtils.javaOptions(varList, jvmOptions);
 
         // Add shared environment variables used for all containers
-        varList.addAll(getRequiredEnvVars());
+        varList.addAll(sharedEnvironmentProvider.variables());
 
-        addContainerEnvsToExistingEnvs(varList, templateContainerEnvVars);
+        ContainerUtils.addContainerEnvsToExistingEnvs(reconciliation, varList, templateContainer);
 
         // if maintenance time windows are set, we pass them as environment variable
         if (maintenanceWindows != null && !maintenanceWindows.isEmpty())    {
             // The Cron expressions can contain commas -> we use semi-colon as delimiter
-            varList.add(buildEnvVar(ENV_VAR_MAINTENANCE_TIME_WINDOWS, String.join(";", maintenanceWindows)));
+            varList.add(ContainerUtils.createEnvVar(ENV_VAR_MAINTENANCE_TIME_WINDOWS, String.join(";", maintenanceWindows)));
         }
 
         return varList;
     }
 
-    public List<Volume> getVolumes() {
-        return List.of(VolumeUtils.createConfigMapVolume(logAndMetricsConfigVolumeName, ancillaryConfigMapName));
+    protected List<Volume> getVolumes() {
+        return List.of(VolumeUtils.createConfigMapVolume(LOG_AND_METRICS_CONFIG_VOLUME_NAME, KafkaResources.entityUserOperatorLoggingConfigMapName(cluster)));
     }
 
     private List<VolumeMount> getVolumeMounts() {
-        return List.of(createTempDirVolumeMount(USER_OPERATOR_TMP_DIRECTORY_DEFAULT_VOLUME_NAME),
-                VolumeUtils.createVolumeMount(logAndMetricsConfigVolumeName, logAndMetricsConfigMountPath),
+        return List.of(VolumeUtils.createTempDirVolumeMount(USER_OPERATOR_TMP_DIRECTORY_DEFAULT_VOLUME_NAME),
+                VolumeUtils.createVolumeMount(LOG_AND_METRICS_CONFIG_VOLUME_NAME, LOG_AND_METRICS_CONFIG_VOLUME_MOUNT),
                 VolumeUtils.createVolumeMount(EntityOperator.EUO_CERTS_VOLUME_NAME, EntityOperator.EUO_CERTS_VOLUME_MOUNT),
                 VolumeUtils.createVolumeMount(EntityOperator.TLS_SIDECAR_CA_CERTS_VOLUME_NAME, EntityOperator.TLS_SIDECAR_CA_CERTS_VOLUME_MOUNT));
     }
 
-    @Override
-    protected String getRoleName() {
-        return KafkaResources.entityOperatorDeploymentName(cluster);
-    }
-
+    /**
+     * Generates the User Operator Role Binding
+     *
+     * @param namespace         Namespace where the User Operator is deployed
+     * @param watchedNamespace  Namespace which the User Operator is watching
+     *
+     * @return  Role Binding for the User Operator
+     */
     public RoleBinding generateRoleBindingForRole(String namespace, String watchedNamespace) {
-        Subject ks = new SubjectBuilder()
+        Subject subject = new SubjectBuilder()
                 .withKind("ServiceAccount")
                 .withName(KafkaResources.entityOperatorDeploymentName(cluster))
                 .withNamespace(namespace)
                 .build();
 
         RoleRef roleRef = new RoleRefBuilder()
-                .withName(getRoleName())
+                .withName(KafkaResources.entityOperatorDeploymentName(cluster))
                 .withApiGroup("rbac.authorization.k8s.io")
                 .withKind("Role")
                 .build();
 
-        RoleBinding rb = generateRoleBinding(
-                KafkaResources.entityUserOperatorRoleBinding(cluster),
-                watchedNamespace,
-                roleRef,
-                List.of(ks)
-        );
+        RoleBinding rb = RbacUtils
+                .createRoleBinding(KafkaResources.entityUserOperatorRoleBinding(cluster), watchedNamespace, roleRef, List.of(subject), labels, ownerReference, templateRoleBinding);
 
         // We set OwnerReference only within the same namespace since it does not work cross-namespace
         if (!namespace.equals(watchedNamespace)) {
@@ -267,27 +251,6 @@ public class EntityUserOperator extends AbstractModel {
         }
 
         return rb;
-    }
-
-    public void setContainerEnvVars(List<ContainerEnvVar> envVars) {
-        templateContainerEnvVars = envVars;
-    }
-
-    public void setContainerSecurityContext(SecurityContext securityContext) {
-        templateContainerSecurityContext = securityContext;
-    }
-
-    /**
-     * Transforms properties to log4j2 properties file format and adds property for reloading the config
-     * @param properties map with properties
-     * @return modified string with monitorInterval
-     */
-    @Override
-    public String createLog4jProperties(OrderedProperties properties) {
-        if (!properties.asMap().containsKey("monitorInterval")) {
-            properties.addPair("monitorInterval", "30");
-        }
-        return super.createLog4jProperties(properties);
     }
 
     /**
@@ -302,8 +265,8 @@ public class EntityUserOperator extends AbstractModel {
      */
     public Secret generateSecret(ClusterCa clusterCa, boolean isMaintenanceTimeWindowsSatisfied) {
         Secret secret = clusterCa.entityUserOperatorSecret();
-        return ModelUtils.buildSecret(reconciliation, clusterCa, secret, namespace, KafkaResources.entityUserOperatorSecretName(cluster), name,
-            CERT_SECRET_KEY_NAME, labels, createOwnerReference(), isMaintenanceTimeWindowsSatisfied);
+        return ModelUtils.buildSecret(reconciliation, clusterCa, secret, namespace, KafkaResources.entityUserOperatorSecretName(cluster), componentName,
+            CERT_SECRET_KEY_NAME, labels, ownerReference, isMaintenanceTimeWindowsSatisfied);
     }
 
     /**
@@ -313,13 +276,29 @@ public class EntityUserOperator extends AbstractModel {
         return watchedNamespace;
     }
 
-    @Override
-    protected String getDefaultLogConfigFileName() {
-        return "entityUserOperatorDefaultLoggingProperties";
+    /**
+     * Generates a metrics and logging ConfigMap according to the configuration. If this operand doesn't support logging
+     * or metrics, they will nto be set.
+     *
+     * @param metricsAndLogging     The external CMs with logging and metrics configuration
+     *
+     * @return The generated ConfigMap
+     */
+    public ConfigMap generateMetricsAndLogConfigMap(MetricsAndLogging metricsAndLogging) {
+        return ConfigMapUtils
+                .createConfigMap(
+                        KafkaResources.entityUserOperatorLoggingConfigMapName(cluster),
+                        namespace,
+                        labels,
+                        ownerReference,
+                        ConfigMapUtils.generateMetricsAndLogConfigMapData(reconciliation, this, metricsAndLogging)
+                );
     }
 
-    @Override
-    public String getAncillaryConfigMapKeyLogConfig() {
-        return "log4j2.properties";
+    /**
+     * @return  Logging Model instance for configuring logging
+     */
+    public LoggingModel logging()   {
+        return logging;
     }
 }

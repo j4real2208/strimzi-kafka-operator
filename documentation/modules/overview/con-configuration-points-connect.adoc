@@ -58,21 +58,21 @@ metadata:
     strimzi.io/use-connector-resources: "true"
 spec:
   # ...
-  build: <1>
-    output: <2>
+  build: # <1>
+    output: # <2>
       type: docker
       image: my-registry.io/my-org/my-connect-cluster:latest
       pushSecret: my-registry-credentials
-    plugins: <3>
-      - name: debezium-postgres-connector
+    plugins: # <3>
+      - name: my-connector
         artifacts:
           - type: tgz
-            url: https://_ARTIFACT-ADDRESS_.tgz
-            sha512sum: _HASH-NUMBER-TO-VERIFY-ARTIFACT_
+            url: https://<plugin_download_location>.tgz
+            sha512sum: <checksum_to_verify_the_plugin>
       # ...
   # ...
 ----
-<1> link:{BookURLUsing}#type-Build-reference[Build configuration properties^] for building a container image with plugins automatically.
+<1> link:{BookURLConfiguring}#type-Build-reference[Build configuration properties^] for building a container image with plugins automatically.
 <2> Configuration of the container registry where new images are pushed. The `output` properties describe the type and name of the image, and optionally the name of the secret containing the credentials needed to access the container registry.
 <3> List of plugins and their artifacts to add to the new container image. The `plugins` properties describe the type of artifact and the URL from which the artifact is downloaded. Each plugin must be configured with at least one artifact. Additionally, you can specify a SHA-512 checksum to verify the artifact before unpacking it.
 
@@ -183,32 +183,9 @@ You can also specify where the data should sit in Kafka by specifying a target t
 Use `tasksMax` to specify the maximum number of tasks.
 For example, a source connector with `tasksMax: 2` might split the import of source data into two tasks.
 
-.Example KafkaConnector source connector configuration
-[source,yaml,subs="attributes+"]
-----
-apiVersion: {KafkaConnectApiVersion}
-kind: KafkaConnector
-metadata:
-  name: my-source-connector  <1>
-  labels:
-    strimzi.io/cluster: my-connect-cluster <2>
-spec:
-  class: org.apache.kafka.connect.file.FileStreamSourceConnector <3>
-  tasksMax: 2 <4>
-  config: <5>
-    file: "/opt/kafka/LICENSE" <6>
-    topic: my-topic <7>
-    # ...
-----
-<1> Name of the `KafkaConnector` resource, which is used as the name of the connector. Use any name that is valid for a Kubernetes resource.
-<2> Name of the Kafka Connect cluster to create the connector instance in. Connectors must be deployed to the same namespace as the Kafka Connect cluster they link to.
-<3> Full name of the connector class. This should be present in the image being used by the Kafka Connect cluster.
-<4> Maximum number of Kafka Connect tasks that the connector can create.
-<5> link:{BookURLDeploying}#kafkaconnector-configs[Connector configuration^] as key-value pairs.
-<6> Location of the external data file. In this example, we're configuring the `FileStreamSourceConnector` to read from the `/opt/kafka/LICENSE` file.
-<7> Kafka topic to publish the source data to.
+include::../../shared/snip-example-source-connector-config.adoc[]
 
-NOTE: You can link:{BookURLUsing}#proc-loading-config-with-provider-str[load confidential configuration values for a connector^] from Kubernetes Secrets or ConfigMaps.
+NOTE: You can link:{BookURLDeploying}#assembly-loading-config-with-providers-str[load confidential configuration values for a connector^] from external sources, such as Kubernetes Secrets or ConfigMaps.
 
 [discrete]
 == Kafka Connect API
@@ -238,7 +215,7 @@ curl -X POST \
 
 If KafkaConnectors are enabled, manual changes made directly using the Kafka Connect REST API are reverted by the Cluster Operator.
 
-The operations supported by the REST API are described in the http://kafka.apache.org[Apache Kafka documentation^].
+The operations supported by the REST API are described in the {ApacheKafkaConnectAPI}.
 
 NOTE: You can expose the Kafka Connect API service outside Kubernetes.
 You do this by creating a service that uses a connection mechanism that provides the access, such as an ingress or route.
@@ -247,11 +224,11 @@ Use advisedly as the connection is insecure.
 [role="_additional-resources"]
 .Additional resources
 
-* link:{BookURLUsing}#assembly-kafka-connect-str[Kafka Connect configuration options^]
-* link:{BookURLUsing}#con-kafka-connect-multiple-instances-str[Kafka Connect configuration for multiple instances^]
+* link:{BookURLDeploying}#con-kafka-connect-config-str[Kafka Connect configuration options^]
+* link:{BookURLDeploying}#con-kafka-connect-multiple-instances-str[Kafka Connect configuration for multiple instances^]
 * link:{BookURLDeploying}#using-kafka-connect-with-plug-ins-str[Extending Kafka Connect with plugins^]
 * link:{BookURLDeploying}#creating-new-image-using-kafka-connect-build-str[Creating a new container image automatically using Strimzi^]
 * link:{BookURLDeploying}#creating-new-image-from-base-str[Creating a Docker image from the Kafka Connect base image^]
-* link:{BookURLUsing}#type-Build-reference[Build schema reference^]
+* link:{BookURLConfiguring}#type-Build-reference[Build schema reference^]
 * link:{BookURLDeploying}#kafkaconnector-configs[Source and sink connector configuration options^]
-* link:{BookURLUsing}#proc-loading-config-with-provider-str[Loading configuration values from external sources^]
+* link:{BookURLDeploying}#assembly-loading-config-with-providers-str[Loading configuration values from external sources^]

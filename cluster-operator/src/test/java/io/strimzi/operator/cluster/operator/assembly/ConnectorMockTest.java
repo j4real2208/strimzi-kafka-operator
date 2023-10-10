@@ -8,7 +8,6 @@ import io.fabric8.kubernetes.api.model.LabelSelector;
 import io.fabric8.kubernetes.api.model.StatusDetails;
 import io.fabric8.kubernetes.client.CustomResource;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
@@ -18,6 +17,7 @@ import io.micrometer.core.instrument.Tags;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.netty.channel.ConnectTimeoutException;
 import io.strimzi.api.kafka.Crds;
+import io.strimzi.api.kafka.model.ConnectorState;
 import io.strimzi.api.kafka.model.KafkaConnect;
 import io.strimzi.api.kafka.model.KafkaConnectBuilder;
 import io.strimzi.api.kafka.model.KafkaConnectResources;
@@ -28,7 +28,7 @@ import io.strimzi.api.kafka.model.connect.ConnectorPluginBuilder;
 import io.strimzi.api.kafka.model.status.Condition;
 import io.strimzi.api.kafka.model.status.Status;
 import io.strimzi.platform.KubernetesVersion;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
 import io.strimzi.operator.cluster.ResourceUtils;
@@ -48,6 +48,7 @@ import io.strimzi.test.mockkube2.MockKube2;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.json.JsonObject;
 import io.vertx.junit5.Checkpoint;
 import io.vertx.junit5.VertxExtension;
@@ -65,7 +66,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
@@ -82,6 +82,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -100,25 +101,27 @@ public class ConnectorMockTest {
 
     private static final String NAMESPACE = "ns";
 
-    static class ConnectorState {
-        boolean paused;
+    static class ConnectorStatus {
+        ConnectorState state;
         JsonObject config;
 
-        public ConnectorState(boolean paused, JsonObject config) {
-            this.paused = paused;
+        public ConnectorStatus(ConnectorState state, JsonObject config) {
+            this.state = state;
             this.config = config;
         }
     }
 
     private Vertx vertx;
+    private WorkerExecutor sharedWorkerExecutor;
     // Injected by Fabric8 Mock Kubernetes Server
     @SuppressWarnings("unused")
     private KubernetesClient client;
     private MockKube2 mockKube;
-    private Watch connectWatch;
-    private Watch connectorWatch;
+    private StrimziPodSetController podSetController;
+    private ReconnectingWatcher<KafkaConnect> connectWatch;
+    private ReconnectingWatcher<KafkaConnector> connectorWatch;
     private KafkaConnectApi api;
-    private HashMap<String, ConnectorState> runningConnectors;
+    private HashMap<String, ConnectorStatus> connectors;
     private KafkaConnectAssemblyOperator kafkaConnectOperator;
     private MetricsProvider metricsProvider;
 
@@ -127,18 +130,18 @@ public class ConnectorMockTest {
     }
 
     private Future<Map<String, Object>> kafkaConnectApiStatusMock(String host, String connectorName)   {
-        ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
+        ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
         Map<String, Object> statusNode = new HashMap<>();
         statusNode.put("name", connectorName);
         Map<String, Object> connector = new HashMap<>();
         statusNode.put("connector", connector);
-        connector.put("state", connectorState.paused ? "PAUSED" : "RUNNING");
+        connector.put("state", connectorStatus.state.toString());
         connector.put("worker_id", "somehost0:8083");
         Map<String, Object> task = new HashMap<>();
         task.put("id", 0);
-        task.put("state", connectorState.paused ? "PAUSED" : "RUNNING");
+        task.put("state", connectorStatus.state.toString());
         task.put("worker_id", "somehost2:8083");
-        List<Map> tasks = singletonList(task);
+        List<Map<String, Object>> tasks = singletonList(task);
         statusNode.put("tasks", tasks);
 
         return Future.succeededFuture(statusNode);
@@ -148,32 +151,38 @@ public class ConnectorMockTest {
     @BeforeEach
     public void setup(VertxTestContext testContext) {
         vertx = Vertx.vertx();
+        sharedWorkerExecutor = vertx.createSharedWorkerExecutor("kubernetes-ops-pool");
 
         // Configure the Kubernetes Mock
         mockKube = new MockKube2.MockKube2Builder(client)
+                .withKafkaCrd()
                 .withKafkaConnectCrd()
                 .withKafkaConnectorCrd()
-                .withDeploymentController()
+                .withPodController()
                 .build();
         mockKube.start();
 
-        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.V1_18);
-        setupMockConnectAPI();
-
+        PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION);
         metricsProvider = ResourceUtils.metricsProvider();
         ResourceOperatorSupplier ros = new ResourceOperatorSupplier(vertx, client,
                 new ZookeeperLeaderFinder(vertx,
-                    // Retry up to 3 times (4 attempts), with overall max delay of 35000ms
-                    () -> new BackOff(5_000, 2, 4)),
+                        // Retry up to 3 times (4 attempts), with overall max delay of 35000ms
+                        () -> new BackOff(5_000, 2, 4)),
                 new DefaultAdminClientProvider(),
                 new DefaultZookeeperScalerProvider(),
                 metricsProvider,
                 pfa, 10_000);
-        ClusterOperatorConfig config = ClusterOperatorConfig.fromMap(map(
+
+        podSetController = new StrimziPodSetController(NAMESPACE, Labels.EMPTY, ros.kafkaOperator, ros.connectOperator, ros.mirrorMaker2Operator, ros.strimziPodSetOperator, ros.podOperations, ros.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
+        podSetController.start();
+
+        setupMockConnectAPI();
+
+        ClusterOperatorConfig config = ClusterOperatorConfig.buildFromMap(map(
             ClusterOperatorConfig.STRIMZI_KAFKA_IMAGES, KafkaVersionTestUtils.getKafkaImagesEnvVarString(),
             ClusterOperatorConfig.STRIMZI_KAFKA_CONNECT_IMAGES, KafkaVersionTestUtils.getKafkaConnectImagesEnvVarString(),
             ClusterOperatorConfig.STRIMZI_KAFKA_MIRROR_MAKER_2_IMAGES, KafkaVersionTestUtils.getKafkaMirrorMaker2ImagesEnvVarString(),
-            ClusterOperatorConfig.STRIMZI_FULL_RECONCILIATION_INTERVAL_MS, Long.toString(Long.MAX_VALUE)),
+            ClusterOperatorConfig.FULL_RECONCILIATION_INTERVAL_MS.key(), Long.toString(Long.MAX_VALUE)),
                 KafkaVersionTestUtils.getKafkaVersionLookup());
         kafkaConnectOperator = spy(new KafkaConnectAssemblyOperator(vertx,
             pfa,
@@ -183,26 +192,26 @@ public class ConnectorMockTest {
 
         Checkpoint async = testContext.checkpoint();
         // Fail test if watcher closes for any reason
-        kafkaConnectOperator.createWatch(NAMESPACE, e -> testContext.failNow(e))
-            .onComplete(testContext.succeedingThenComplete())
+        kafkaConnectOperator.createWatch(NAMESPACE)
+            .onComplete(testContext.succeeding(i -> { }))
             .compose(watch -> {
                 connectWatch = watch;
-                return AbstractConnectOperator.createConnectorWatch(kafkaConnectOperator, NAMESPACE, null);
+                return kafkaConnectOperator.createConnectorWatch(NAMESPACE);
             }).compose(watch -> {
                 connectorWatch = watch;
-                //async.flag();
                 return Future.succeededFuture();
             }).onComplete(testContext.succeeding(v -> async.flag()));
     }
 
+    @SuppressWarnings({"checkstyle:JavaNCSS", "checkstyle:NPathComplexity"})
     private void setupMockConnectAPI() {
         api = mock(KafkaConnectApi.class);
-        runningConnectors = new HashMap<>();
+        connectors = new HashMap<>();
 
-        when(api.list(any(), anyInt())).thenAnswer(i -> {
-            String host = i.getArgument(0);
+        when(api.list(any(), any(), anyInt())).thenAnswer(i -> {
+            String host = i.getArgument(1);
             String matchingKeyPrefix = host + "##";
-            return Future.succeededFuture(runningConnectors.keySet().stream()
+            return Future.succeededFuture(connectors.keySet().stream()
                     .filter(s -> s.startsWith(matchingKeyPrefix))
                     .map(s -> s.substring(matchingKeyPrefix.length()))
                     .collect(Collectors.toList()));
@@ -219,11 +228,11 @@ public class ConnectorMockTest {
         when(api.getConnectorConfig(any(), any(), any(), anyInt(), any())).thenAnswer(invocation -> {
             String host = invocation.getArgument(2);
             String connectorName = invocation.getArgument(4);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState != null) {
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus != null) {
                 Map<String, String> map = new HashMap<>();
                 map.put("name", connectorName);
-                for (Map.Entry<String, Object> entry : connectorState.config) {
+                for (Map.Entry<String, Object> entry : connectorStatus.config) {
                     if (entry.getValue() != null) {
                         map.put(entry.getKey(), entry.getValue().toString());
                     }
@@ -236,13 +245,13 @@ public class ConnectorMockTest {
         when(api.getConnector(any(), any(), anyInt(), any())).thenAnswer(invocation -> {
             String host = invocation.getArgument(1);
             String connectorName = invocation.getArgument(3);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("GET", String.format("/connectors/%s", connectorName), 404, "Not Found", ""));
             }
             return Future.succeededFuture(TestUtils.map(
                     "name", connectorName,
-                    "config", connectorState.config,
+                    "config", connectorStatus.config,
                     "tasks", emptyMap()));
         });
         when(api.createOrUpdatePutRequest(any(), any(), anyInt(), anyString(), any())).thenAnswer(invocation -> {
@@ -251,14 +260,14 @@ public class ConnectorMockTest {
             LOGGER.info("###### create " + host);
             String connectorName = invocation.getArgument(3);
             JsonObject connectorConfig = invocation.getArgument(4);
-            runningConnectors.putIfAbsent(key(host, connectorName), new ConnectorState(false, connectorConfig));
+            connectors.putIfAbsent(key(host, connectorName), new ConnectorStatus(ConnectorState.RUNNING, connectorConfig));
             return Future.succeededFuture();
         });
         when(api.delete(any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
             String host = invocation.getArgument(1);
             LOGGER.info("###### delete " + host);
             String connectorName = invocation.getArgument(3);
-            ConnectorState remove = runningConnectors.remove(key(host, connectorName));
+            ConnectorStatus remove = connectors.remove(key(host, connectorName));
             return remove != null ? Future.succeededFuture() : Future.failedFuture("No such connector " + connectorName);
         });
         when(api.statusWithBackOff(any(), any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
@@ -273,35 +282,47 @@ public class ConnectorMockTest {
             String connectorName = invocation.getArgument(3);
             return kafkaConnectApiStatusMock(host, connectorName);
         });
-        when(api.pause(any(), anyInt(), anyString())).thenAnswer(invocation -> {
-            String host = invocation.getArgument(0);
-            String connectorName = invocation.getArgument(2);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+        when(api.pause(any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
+            String host = invocation.getArgument(1);
+            String connectorName = invocation.getArgument(3);
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("PUT", "", 404, "Not found", "Connector name " + connectorName));
             }
-            if (!connectorState.paused) {
-                runningConnectors.put(key(host, connectorName), new ConnectorState(true, connectorState.config));
+            if (!ConnectorState.PAUSED.equals(connectorStatus.state)) {
+                connectors.put(key(host, connectorName), new ConnectorStatus(ConnectorState.PAUSED, connectorStatus.config));
             }
             return Future.succeededFuture();
         });
-        when(api.resume(any(), anyInt(), anyString())).thenAnswer(invocation -> {
-            String host = invocation.getArgument(0);
-            String connectorName = invocation.getArgument(2);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+        when(api.stop(any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
+            String host = invocation.getArgument(1);
+            String connectorName = invocation.getArgument(3);
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("PUT", "", 404, "Not found", "Connector name " + connectorName));
             }
-            if (connectorState.paused) {
-                runningConnectors.put(key(host, connectorName), new ConnectorState(false, connectorState.config));
+            if (!ConnectorState.STOPPED.equals(connectorStatus.state)) {
+                connectors.put(key(host, connectorName), new ConnectorStatus(ConnectorState.STOPPED, connectorStatus.config));
             }
             return Future.succeededFuture();
         });
-        when(api.restart(any(), anyInt(), anyString())).thenAnswer(invocation -> {
+        when(api.resume(any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
+            String host = invocation.getArgument(1);
+            String connectorName = invocation.getArgument(3);
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
+                return Future.failedFuture(new ConnectRestException("PUT", "", 404, "Not found", "Connector name " + connectorName));
+            }
+            if (ConnectorState.STOPPED.equals(connectorStatus.state) || ConnectorState.PAUSED.equals(connectorStatus.state)) {
+                connectors.put(key(host, connectorName), new ConnectorStatus(ConnectorState.RUNNING, connectorStatus.config));
+            }
+            return Future.succeededFuture();
+        });
+        when(api.restart(any(), anyInt(), anyString(), anyBoolean(), anyBoolean())).thenAnswer(invocation -> {
             String host = invocation.getArgument(0);
             String connectorName = invocation.getArgument(2);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("PUT", "", 404, "Not found", "Connector name " + connectorName));
             }
             return Future.succeededFuture();
@@ -309,8 +330,8 @@ public class ConnectorMockTest {
         when(api.restartTask(any(), anyInt(), anyString(), anyInt())).thenAnswer(invocation -> {
             String host = invocation.getArgument(0);
             String connectorName = invocation.getArgument(2);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("PUT", "", 404, "Not found", "Connector name " + connectorName));
             }
             return Future.succeededFuture();
@@ -318,8 +339,8 @@ public class ConnectorMockTest {
         when(api.getConnectorTopics(any(), any(), anyInt(), anyString())).thenAnswer(invocation -> {
             String host = invocation.getArgument(1);
             String connectorName = invocation.getArgument(3);
-            ConnectorState connectorState = runningConnectors.get(key(host, connectorName));
-            if (connectorState == null) {
+            ConnectorStatus connectorStatus = connectors.get(key(host, connectorName));
+            if (connectorStatus == null) {
                 return Future.failedFuture(new ConnectRestException("GET", String.format("/connectors/%s/topics", connectorName), 404, "Not Found", ""));
             }
             return Future.succeededFuture(List.of("my-topic"));
@@ -328,9 +349,11 @@ public class ConnectorMockTest {
 
     @AfterEach
     public void teardown() {
+        podSetController.stop();
         mockKube.stop();
         connectWatch.close();
         connectorWatch.close();
+        sharedWorkerExecutor.close();
         vertx.close();
     }
 
@@ -353,11 +376,11 @@ public class ConnectorMockTest {
 
     private static <T extends CustomResource<?, ? extends Status>> Predicate<T> ready() {
         return c -> c.getStatus() != null
-                && c.getStatus().getConditions().stream()
-                .anyMatch(condition ->
-                        "Ready".equals(condition.getType())
-                                && "True".equals(condition.getStatus())
-                );
+                    && c.getStatus().getConditions().stream()
+                    .anyMatch(condition ->
+                            "Ready".equals(condition.getType())
+                                    && "True".equals(condition.getStatus())
+                    );
     }
 
     private static <T extends CustomResource<?, ? extends Status>> Predicate<T> paused() {
@@ -634,7 +657,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
 
         verify(api, never()).createOrUpdatePutRequest(any(),
@@ -656,17 +679,17 @@ public class ConnectorMockTest {
         Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(connector).create();
         waitForConnectorReady(connectorName);
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         List<StatusDetails> connectorDeleted = Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).delete();
         assertThat(connectorDeleted.size(), is(1));
         waitFor("delete call on connect REST api", 1_000, 30_000,
-            () -> runningConnectors.isEmpty());
+            () -> connectors.isEmpty());
         // Verify connector is deleted from the connect via REST api
         verify(api).delete(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -696,12 +719,12 @@ public class ConnectorMockTest {
         waitForConnectorNotReady(connectorName, "NoSuchResourceException",
             "KafkaConnect resource 'cluster' identified by label '" + Labels.STRIMZI_CLUSTER_LABEL + "' does not exist in namespace ns.");
 
-        verify(api, never()).list(
+        verify(api, never()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(empty()));
+        assertThat(connectors.keySet(), is(empty()));
 
         // Create KafkaConnect cluster and wait till it's ready
         KafkaConnect connect = new KafkaConnectBuilder()
@@ -719,18 +742,18 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         // Might be triggered multiple times (Connect creation, Connector Status update, Connect Status update), depending on the timing
         verify(api, atLeastOnce()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         List<StatusDetails> connectorDeleted = Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).delete();
         assertThat(connectorDeleted.size(), is(1));
         waitFor("delete call on connect REST api", 1_000, 30_000,
-            () -> runningConnectors.isEmpty());
+            () -> connectors.isEmpty());
         verify(api, atLeastOnce()).delete(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
@@ -760,7 +783,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -782,13 +805,13 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         // triggered twice (Connect creation, Connector Status update)
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         List<StatusDetails> connectDeleted = Crds.kafkaConnectOperation(client).inNamespace(NAMESPACE).withName(connectName).delete();
         assertThat(connectDeleted.size(), is(1));
@@ -823,12 +846,12 @@ public class ConnectorMockTest {
         waitForConnectorNotReady(connectorName, "NoSuchResourceException",
                 "KafkaConnect resource 'cluster' identified by label '" + Labels.STRIMZI_CLUSTER_LABEL + "' does not exist in namespace ns.");
 
-        verify(api, never()).list(
+        verify(api, never()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(empty()));
+        assertThat(connectors.keySet(), is(empty()));
 
         // Create KafkaConnect cluster and wait till it's ready
         KafkaConnect connect = new KafkaConnectBuilder()
@@ -846,13 +869,13 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         // Triggered once or twice (Connect creation, Connector Status update), depending on the timing
         verify(api, atLeastOnce()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         List<StatusDetails> connectDeleted = Crds.kafkaConnectOperation(client).inNamespace(NAMESPACE).withName(connectName).delete();
         assertThat(connectDeleted.size(), is(1));
@@ -970,7 +993,7 @@ public class ConnectorMockTest {
         when(api.createOrUpdatePutRequest(any(), any(), anyInt(), anyString(), any()))
             .thenAnswer(invocation -> Future.failedFuture(new ConnectRestException("GET", "/foo", 500, "Internal server error", "Bad stuff happened")));
         // NOTE: Clear runningConnectors as re-mocking it causes an entry to be added
-        runningConnectors.clear();
+        connectors.clear();
 
 
         // Create KafkaConnect cluster and wait till it's ready
@@ -988,7 +1011,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // triggered at least once (Connect creation)
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1008,18 +1031,18 @@ public class ConnectorMockTest {
         waitForConnectorNotReady(connectorName,
                 "ConnectRestException", "GET /foo returned 500 (Internal server error): Bad stuff happened");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         // Might be triggered multiple times depending on the timing
         verify(api, atLeastOnce()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(empty()));
+        assertThat(connectors.keySet(), is(empty()));
     }
 
-    /** Create connect, create connector, pause connector, resume connector */
+    /** Create connect, create connector, pause connector via deprecated pause field, resume connector */
     @Test
-    public void testConnectorPauseResume() {
+    public void testConnectorDeprecatedPauseResume() {
         String connectName = "cluster";
         String connectorName = "connector";
 
@@ -1038,7 +1061,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1060,17 +1083,17 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
-        verify(api, never()).pause(
+        verify(api, never()).pause(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
-        verify(api, never()).resume(
+        verify(api, never()).resume(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
 
@@ -1082,10 +1105,10 @@ public class ConnectorMockTest {
 
         waitForConnectorState(connectorName, "PAUSED");
 
-        verify(api, times(1)).pause(
+        verify(api, times(1)).pause(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
-        verify(api, never()).resume(
+        verify(api, never()).resume(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
 
@@ -1097,12 +1120,233 @@ public class ConnectorMockTest {
 
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(1)).pause(
+        verify(api, times(1)).pause(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
-        verify(api, times(1)).resume(
+        verify(api, times(1)).resume(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName));
+    }
+
+    /** Create connect, create connector, pause connector, resume connector */
+    @Test
+    public void testConnectorPauseResume() {
+        String connectName = "cluster";
+        String connectorName = "connector";
+
+        // Create KafkaConnect cluster and wait till it's ready
+        KafkaConnect connect = new KafkaConnectBuilder()
+                .withNewMetadata()
+                .withNamespace(NAMESPACE)
+                .withName(connectName)
+                .addToAnnotations(Annotations.STRIMZI_IO_USE_CONNECTOR_RESOURCES, "true")
+                .endMetadata()
+                .withNewSpec()
+                .withReplicas(1)
+                .endSpec()
+                .build();
+        Crds.kafkaConnectOperation(client).inNamespace(NAMESPACE).resource(connect).create();
+        waitForConnectReady(connectName);
+
+        // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
+        verify(api, atLeastOnce()).list(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
+        verify(api, never()).createOrUpdatePutRequest(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName), any());
+
+        // Create KafkaConnector and wait till it's ready
+        KafkaConnector connector = new KafkaConnectorBuilder()
+                .withNewMetadata()
+                .withName(connectorName)
+                .withNamespace(NAMESPACE)
+                .addToLabels(Labels.STRIMZI_CLUSTER_LABEL, connectName)
+                .endMetadata()
+                .withNewSpec()
+                .withTasksMax(1)
+                .withClassName("Dummy")
+                .endSpec()
+                .build();
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(connector).create();
+        waitForConnectorReady(connectorName);
+        waitForConnectorState(connectorName, "RUNNING");
+
+        verify(api, times(2)).list(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
+        verify(api, times(1)).createOrUpdatePutRequest(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName), any());
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+
+        verify(api, never()).pause(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, never()).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).edit(spec -> new KafkaConnectorBuilder(spec)
+                .editSpec()
+                .withState(ConnectorState.PAUSED)
+                .endSpec()
+                .build());
+
+        waitForConnectorState(connectorName, "PAUSED");
+
+        verify(api, times(1)).pause(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, never()).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).edit(sp -> new KafkaConnectorBuilder(sp)
+                .editSpec()
+                .withState(ConnectorState.RUNNING)
+                .endSpec()
+                .build());
+
+        waitForConnectorState(connectorName, "RUNNING");
+
+        verify(api, times(1)).pause(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, times(1)).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+    }
+
+    /** Create connect, create connector, stop connector, resume connector */
+    @Test
+    public void testConnectorStopResume() {
+        String connectName = "cluster";
+        String connectorName = "connector";
+
+        // Create KafkaConnect cluster and wait till it's ready
+        KafkaConnect connect = new KafkaConnectBuilder()
+                .withNewMetadata()
+                .withNamespace(NAMESPACE)
+                .withName(connectName)
+                .addToAnnotations(Annotations.STRIMZI_IO_USE_CONNECTOR_RESOURCES, "true")
+                .endMetadata()
+                .withNewSpec()
+                .withReplicas(1)
+                .endSpec()
+                .build();
+        Crds.kafkaConnectOperation(client).inNamespace(NAMESPACE).resource(connect).create();
+        waitForConnectReady(connectName);
+
+        // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
+        verify(api, atLeastOnce()).list(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
+        verify(api, never()).createOrUpdatePutRequest(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName), any());
+
+        // Create KafkaConnector and wait till it's ready
+        KafkaConnector connector = new KafkaConnectorBuilder()
+                .withNewMetadata()
+                .withName(connectorName)
+                .withNamespace(NAMESPACE)
+                .addToLabels(Labels.STRIMZI_CLUSTER_LABEL, connectName)
+                .endMetadata()
+                .withNewSpec()
+                .withTasksMax(1)
+                .withClassName("Dummy")
+                .endSpec()
+                .build();
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(connector).create();
+        waitForConnectorReady(connectorName);
+        waitForConnectorState(connectorName, "RUNNING");
+
+        verify(api, times(2)).list(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
+        verify(api, times(1)).createOrUpdatePutRequest(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName), any());
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+
+        verify(api, never()).stop(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, never()).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).edit(spec -> new KafkaConnectorBuilder(spec)
+                .editSpec()
+                .withState(ConnectorState.STOPPED)
+                .endSpec()
+                .build());
+
+        waitForConnectorState(connectorName, "STOPPED");
+
+        verify(api, times(1)).stop(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, never()).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).withName(connectorName).edit(sp -> new KafkaConnectorBuilder(sp)
+                .editSpec()
+                .withState(ConnectorState.RUNNING)
+                .endSpec()
+                .build());
+
+        waitForConnectorState(connectorName, "RUNNING");
+
+        verify(api, times(1)).stop(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+        verify(api, times(1)).resume(any(),
+                eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
+                eq(connectorName));
+    }
+
+    /** Create connect, create connector, stop connector but Connect does no support it */
+    @Test
+    public void testConnectorBothStateAndPause() {
+        String connectName = "cluster";
+        String connectorName = "connector";
+
+        // Create KafkaConnect cluster and wait till it's ready
+        Crds.kafkaConnectOperation(client).inNamespace(NAMESPACE).resource(new KafkaConnectBuilder()
+                        .withNewMetadata()
+                        .withNamespace(NAMESPACE)
+                        .withName(connectName)
+                        .addToAnnotations(Annotations.STRIMZI_IO_USE_CONNECTOR_RESOURCES, "true")
+                        .endMetadata()
+                        .withNewSpec()
+                        .withReplicas(1)
+                        .endSpec()
+                        .build())
+                .create();
+        waitForConnectReady(connectName);
+
+        String yaml = "apiVersion: kafka.strimzi.io/v1beta2\n" +
+                "kind: KafkaConnector\n" +
+                "metadata:\n" +
+                "  name: " + connectorName + "\n" +
+                "  namespace: " + NAMESPACE + "\n" +
+                "  labels:\n" +
+                "    strimzi.io/cluster: " + connectName + "\n" +
+                "spec:\n" +
+                "  class: EchoSink\n" +
+                "  tasksMax: 1\n" +
+                "  pause: true\n" +
+                "  state: \"stopped\"\n" +
+                "  config:\n" +
+                "    level: INFO\n" +
+                "    topics: timer-topic";
+
+        KafkaConnector kcr = TestUtils.fromYamlString(yaml, KafkaConnector.class);
+        Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(kcr).create();
+
+        waitForConnectorReady(connectorName);
+        waitForConnectorState(connectorName, "STOPPED");
+        waitForConnectorCondition(connectorName, "Warning", "DeprecatedFields");
+        waitForConnectorCondition(connectorName, "Warning", "UpdateState");
     }
 
     /** Create connect, create connector, restart connector */
@@ -1126,7 +1370,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1148,16 +1392,18 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         verify(api, never()).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1174,7 +1420,9 @@ public class ConnectorMockTest {
 
         verify(api, times(1)).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1187,7 +1435,7 @@ public class ConnectorMockTest {
         String connectName = "cluster";
         String connectorName = "connector";
 
-        when(api.restart(anyString(), anyInt(), anyString()))
+        when(api.restart(anyString(), anyInt(), anyString(), anyBoolean(), anyBoolean()))
             .thenAnswer(invocation -> Future.failedFuture(new ConnectRestException("GET", "/foo", 500, "Internal server error", "Bad stuff happened")));
 
         // Create KafkaConnect cluster and wait till it's ready
@@ -1205,7 +1453,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1227,16 +1475,18 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         verify(api, never()).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1254,7 +1504,9 @@ public class ConnectorMockTest {
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
         verify(api, atLeastOnce()).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1282,7 +1534,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1304,16 +1556,18 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         verify(api, never()).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1330,7 +1584,9 @@ public class ConnectorMockTest {
 
         verify(api, times(0)).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, times(1)).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1360,7 +1616,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, never()).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
@@ -1382,16 +1638,18 @@ public class ConnectorMockTest {
         waitForConnectorReady(connectorName);
         waitForConnectorState(connectorName, "RUNNING");
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
         verify(api, never()).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         verify(api, never()).restartTask(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
             eq(connectorName), eq(0));
@@ -1408,7 +1666,9 @@ public class ConnectorMockTest {
 
         verify(api, times(0)).restart(
             eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
-            eq(connectorName));
+            eq(connectorName),
+            eq(false),
+            eq(false));
         // Might be triggered twice (on annotation and on status update), but the second hit is sometimes only after
         // this check depending on the timing
         verify(api, atLeastOnce()).restartTask(
@@ -1437,7 +1697,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
 
         verify(api, never()).createOrUpdatePutRequest(any(),
@@ -1459,14 +1719,14 @@ public class ConnectorMockTest {
         Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(connector).create();
         waitForConnectorReady(connectorName);
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
-        when(api.list(any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
+        when(api.list(any(), any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.listConnectorPlugins(any(), any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.createOrUpdatePutRequest(any(), any(), anyInt(), anyString(), any())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.getConnectorConfig(any(), any(), anyInt(), any())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
@@ -1503,7 +1763,7 @@ public class ConnectorMockTest {
         waitForConnectReady(connectName);
 
         // could be triggered twice (creation followed by status update) but waitForConnectReady could be satisfied with single
-        verify(api, atLeastOnce()).list(
+        verify(api, atLeastOnce()).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
 
         verify(api, never()).createOrUpdatePutRequest(any(),
@@ -1525,14 +1785,14 @@ public class ConnectorMockTest {
         Crds.kafkaConnectorOperation(client).inNamespace(NAMESPACE).resource(connector).create();
         waitForConnectorReady(connectorName);
 
-        verify(api, times(2)).list(
+        verify(api, times(2)).list(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT));
         verify(api, times(1)).createOrUpdatePutRequest(any(),
                 eq(KafkaConnectResources.qualifiedServiceName(connectName, NAMESPACE)), eq(KafkaConnectCluster.REST_API_PORT),
                 eq(connectorName), any());
-        assertThat(runningConnectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
+        assertThat(connectors.keySet(), is(Collections.singleton(key("cluster-connect-api.ns.svc", connectorName))));
 
-        when(api.list(any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
+        when(api.list(any(), any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.listConnectorPlugins(any(), any(), anyInt())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.createOrUpdatePutRequest(any(), any(), anyInt(), anyString(), any())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
         when(api.getConnectorConfig(any(), any(), any(), anyInt(), any())).thenReturn(Future.failedFuture(new ConnectTimeoutException("connection timed out")));
@@ -1645,7 +1905,7 @@ public class ConnectorMockTest {
         String connectName = "cluster";
 
         // this connector should be deleted on connect reconciliation
-        when(api.list(anyString(), anyInt())).thenReturn(Future.succeededFuture(List.of("connector")));
+        when(api.list(any(), anyString(), anyInt())).thenReturn(Future.succeededFuture(List.of("connector")));
         when(api.delete(any(), anyString(), anyInt(), anyString())).thenReturn(Future.failedFuture(new RuntimeException("deletion error")));
 
         KafkaConnect kafkaConnect = new KafkaConnectBuilder()
@@ -1901,7 +2161,7 @@ public class ConnectorMockTest {
         String connectorName1 = "connector1";
         String connectorName2 = "connector2";
 
-        when(kafkaConnectOperator.selector()).thenReturn(Optional.of(new LabelSelector(null, Map.of("foo", "bar"))));
+        when(kafkaConnectOperator.selector()).thenReturn(new LabelSelector(null, Map.of("foo", "bar")));
 
         KafkaConnect kafkaConnect = new KafkaConnectBuilder()
                 .withNewMetadata()
@@ -1969,7 +2229,7 @@ public class ConnectorMockTest {
         String connectorName1 = "connector1";
         String connectorName2 = "connector2";
 
-        when(kafkaConnectOperator.selector()).thenReturn(Optional.of(new LabelSelector(null, Map.of("foo", "bar"))));
+        when(kafkaConnectOperator.selector()).thenReturn(new LabelSelector(null, Map.of("foo", "bar")));
 
         KafkaConnect kafkaConnect1 = new KafkaConnectBuilder()
                 .withNewMetadata()

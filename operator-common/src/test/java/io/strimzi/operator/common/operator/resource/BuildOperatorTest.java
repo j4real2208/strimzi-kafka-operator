@@ -14,7 +14,7 @@ import io.vertx.core.Vertx;
 
 import static org.mockito.Mockito.when;
 
-public class BuildOperatorTest extends AbstractResourceOperatorTest<OpenShiftClient, Build, BuildList, BuildResource> {
+public class BuildOperatorTest extends AbstractNamespacedResourceOperatorTest<OpenShiftClient, Build, BuildList, BuildResource> {
 
     @Override
     protected void mocker(OpenShiftClient mockClient, MixedOperation mockCms) {
@@ -37,10 +37,10 @@ public class BuildOperatorTest extends AbstractResourceOperatorTest<OpenShiftCli
     }
 
     @Override
-    protected Build resource() {
+    protected Build resource(String name) {
         return new BuildBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                 .endMetadata()
                 .withNewSpec()
@@ -64,8 +64,8 @@ public class BuildOperatorTest extends AbstractResourceOperatorTest<OpenShiftCli
     }
 
     @Override
-    protected Build modifiedResource() {
-        return new BuildBuilder(resource())
+    protected Build modifiedResource(String name) {
+        return new BuildBuilder(resource(name))
                 .editSpec()
                     .editSource()
                         .withDockerfile("FROM centos:8\nUSER 1001")

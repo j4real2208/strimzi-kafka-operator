@@ -45,6 +45,7 @@ import static io.strimzi.operator.topic.Config.ZOOKEEPER_CONNECT;
 import static io.strimzi.operator.topic.Config.ZOOKEEPER_CONNECTION_TIMEOUT_MS;
 import static io.strimzi.operator.topic.Config.ZOOKEEPER_SESSION_TIMEOUT_MS;
 
+/** Session of Topic operator */
 public class Session extends AbstractVerticle {
 
     private final static Logger LOGGER = LogManager.getLogger(Session.class);
@@ -57,7 +58,11 @@ public class Session extends AbstractVerticle {
 
 
     private final Config config;
+    // this field is required to keep the underlying shared worker pool alive
     private WorkerExecutor executor;
+    // this field is required to keep the underlying shared worker pool alive
+    @SuppressWarnings("unused")
+    private WorkerExecutor kubernetesOpsExecutor;
     private final TopicOperatorState topicOperatorState;
     private final KubernetesClient kubeClient;
     private final BiFunction<Zk, Config, TopicStore> topicStoreCreator;
@@ -121,6 +126,7 @@ public class Session extends AbstractVerticle {
     public void init(Vertx vertx, Context context) {
         super.init(vertx, context);
         executor = vertx.createSharedWorkerExecutor("blocking-startup-ops", 1);
+        kubernetesOpsExecutor = vertx.createSharedWorkerExecutor("kubernetes-ops-pool");
     }
 
     /**
@@ -194,6 +200,9 @@ public class Session extends AbstractVerticle {
         }, stop);
     }
 
+    /**
+     * Starts the operator.
+     */
     @SuppressWarnings({"JavaNCSS", "MethodLength", "CyclomaticComplexity"})
     @Override
     public void start(Promise<Void> start) {
@@ -432,10 +441,10 @@ public class Session extends AbstractVerticle {
                          .requestHandler(request -> {
                              switch (request.path()) {
                                  case "/healthy":
-                                     request.response().setStatusCode(tos.isAlive() ? 200 : 500).end();
+                                     request.response().setStatusCode(tos.isAlive() ? 204 : 500).end();
                                      break;
                                  case "/ready":
-                                     request.response().setStatusCode(tos.isReady() ? 200 : 500).end();
+                                     request.response().setStatusCode(tos.isReady() ? 204 : 500).end();
                                      break;
                                  case "/metrics":
                                      request.response().setStatusCode(200).end(metricsRegistry.scrape());

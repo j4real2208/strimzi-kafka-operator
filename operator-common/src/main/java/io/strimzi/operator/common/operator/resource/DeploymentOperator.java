@@ -19,7 +19,7 @@ import io.vertx.core.Vertx;
 /**
  * Operations for {@code Deployment}s.
  */
-public class DeploymentOperator extends AbstractScalableResourceOperator<KubernetesClient, Deployment, DeploymentList, RollableScalableResource<Deployment>> {
+public class DeploymentOperator extends AbstractScalableNamespacedResourceOperator<KubernetesClient, Deployment, DeploymentList, RollableScalableResource<Deployment>> {
 
     private final PodOperator podOperations;
 
@@ -33,6 +33,13 @@ public class DeploymentOperator extends AbstractScalableResourceOperator<Kuberne
         this(vertx, client, new PodOperator(vertx, client));
     }
 
+    /**
+     * Constructor
+     *
+     * @param vertx             Vert.x instance
+     * @param client            Kubernetes client
+     * @param podOperations     Pod Operator for managing pods
+     */
     public DeploymentOperator(Vertx vertx, KubernetesClient client, PodOperator podOperations) {
         super(vertx, client, "Deployment");
         this.podOperations = podOperations;
@@ -83,10 +90,10 @@ public class DeploymentOperator extends AbstractScalableResourceOperator<Kuberne
     }
 
     @Override
-    protected Future<ReconcileResult<Deployment>> internalPatch(Reconciliation reconciliation, String namespace, String name, Deployment current, Deployment desired) {
+    protected Future<ReconcileResult<Deployment>> internalUpdate(Reconciliation reconciliation, String namespace, String name, Deployment current, Deployment desired) {
         String k8sRev = Annotations.annotations(current).get(Annotations.ANNO_DEP_KUBE_IO_REVISION);
         Annotations.annotations(desired).put(Annotations.ANNO_DEP_KUBE_IO_REVISION, k8sRev);
-        return super.internalPatch(reconciliation, namespace, name, current, desired);
+        return super.internalUpdate(reconciliation, namespace, name, current, desired);
     }
 
     /**

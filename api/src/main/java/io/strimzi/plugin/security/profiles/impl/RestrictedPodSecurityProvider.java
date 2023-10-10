@@ -81,11 +81,6 @@ public class RestrictedPodSecurityProvider extends BaselinePodSecurityProvider {
     }
 
     @Override
-    public SecurityContext jmxTransContainerSecurityContext(ContainerSecurityProviderContext context) {
-        return createRestrictedContainerSecurityContext(context);
-    }
-
-    @Override
     public SecurityContext kafkaConnectContainerSecurityContext(ContainerSecurityProviderContext context) {
         return createRestrictedContainerSecurityContext(context);
     }
@@ -114,6 +109,11 @@ public class RestrictedPodSecurityProvider extends BaselinePodSecurityProvider {
 
     @Override
     public SecurityContext bridgeContainerSecurityContext(ContainerSecurityProviderContext context) {
+        return createRestrictedContainerSecurityContext(context);
+    }
+
+    @Override
+    public SecurityContext bridgeInitContainerSecurityContext(ContainerSecurityProviderContext context) {
         return createRestrictedContainerSecurityContext(context);
     }
 }

@@ -1,12 +1,13 @@
 
 def setupKubernetes(String arch = "amd64") {
-    if (!"${arch}".contains("s390x")) {
+    if ("${arch}".contains("s390x") || "${arch}".contains("ppc64le")) {
+        sh(script: "${workspace}/.azure/scripts/setup-kubernetes.sh ${arch}")
+    } else {
         // set SElinux to permisive mode
         sh(script: "sudo setenforce 0")
         // Install conntrack
         sh(script: "sudo yum install -y conntrack")
     }
-    sh(script: "${workspace}/.azure/scripts/setup-kubernetes.sh ${arch}")
 }
 
 def setupShellheck() {
@@ -30,21 +31,25 @@ def buildKeycloakAndOpa_s390x(String workspace) {
     sh(script: "${workspace}/.jenkins/scripts/build_keycloak_opa-s390x.sh")
 }
 
+def buildKeycloakAndOpa_ppc64le(String workspace) {
+    sh(script: "${workspace}/.jenkins/scripts/build_keycloak_opa-ppc64le.sh")
+}
+
 def buildStrimziImages() {
     sh(script: """
         eval \$(minikube docker-env)
-        MVN_ARGS='-Dsurefire.rerunFailingTestsCount=5 -Dfailsafe.rerunFailingTestsCount=2' make all
+        MVN_ARGS='-Dsurefire.rerunFailingTestsCount=5 -Dfailsafe.rerunFailingTestsCount=2' make all TESTCONTAINERS_RYUK_DISABLED=TRUE TESTCONTAINERS_CHECKS_DISABLE=TRUE
     """)
 }
 
 def prepareUpgradeSTs(String workspace, String dockerRegistry, String dockerTag) {
     println("[INFO] Update files for upgrade procedure")
     sh(script: """
-        sed -i 's#:latest#:${dockerTag}#g' ${workspace}/systemtest/src/test/resources/upgrade/StrimziUpgradeST.yaml ${workspace}/install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml
+        sed -i 's#:latest#:${dockerTag}#g' ${workspace}/systemtest/src/test/resources/upgrade/BundleUpgrade.yaml ${workspace}/install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml
         sed -i 's#quay.io/strimzi/#${dockerRegistry}/strimzi/#g' ${workspace}/install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml
         sed -i 's#/opt/${dockerRegistry}#/opt#g' ${workspace}/install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml
     """)
-    sh(script: "cat ${workspace}/systemtest/src/test/resources/upgrade/StrimziUpgradeST.yaml")
+    sh(script: "cat ${workspace}/systemtest/src/test/resources/upgrade/BundleUpgrade.yaml")
     sh(script: "cat ${workspace}/install/cluster-operator/060-Deployment-strimzi-cluster-operator.yaml")
 }
 

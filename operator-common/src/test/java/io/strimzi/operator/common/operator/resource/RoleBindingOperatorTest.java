@@ -22,7 +22,7 @@ import static java.util.Collections.singletonMap;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class RoleBindingOperatorTest extends AbstractResourceOperatorTest<KubernetesClient, RoleBinding, RoleBindingList, Resource<RoleBinding>> {
+public class RoleBindingOperatorTest extends AbstractNamespacedResourceOperatorTest<KubernetesClient, RoleBinding, RoleBindingList, Resource<RoleBinding>> {
 
 
     @Override
@@ -36,7 +36,7 @@ public class RoleBindingOperatorTest extends AbstractResourceOperatorTest<Kubern
     }
 
     @Override
-    protected RoleBinding resource() {
+    protected RoleBinding resource(String name) {
         Subject ks = new SubjectBuilder()
                 .withKind("ServiceAccount")
                 .withName("some-service-account")
@@ -51,7 +51,7 @@ public class RoleBindingOperatorTest extends AbstractResourceOperatorTest<Kubern
 
         return new RoleBindingBuilder()
                 .withNewMetadata()
-                    .withName(RESOURCE_NAME)
+                    .withName(name)
                     .withNamespace(NAMESPACE)
                     .withLabels(singletonMap("foo", "bar"))
                 .endMetadata()
@@ -61,14 +61,14 @@ public class RoleBindingOperatorTest extends AbstractResourceOperatorTest<Kubern
     }
 
     @Override
-    protected RoleBinding modifiedResource() {
+    protected RoleBinding modifiedResource(String name) {
         RoleRef roleRef = new RoleRefBuilder()
                 .withName("some-other-role")
                 .withApiGroup("rbac.authorization.k8s.io")
                 .withKind("ClusterRole")
                 .build();
 
-        return new RoleBindingBuilder(resource())
+        return new RoleBindingBuilder(resource(name))
                 .withRoleRef(roleRef)
                 .build();
     }
@@ -81,8 +81,8 @@ public class RoleBindingOperatorTest extends AbstractResourceOperatorTest<Kubern
     }
 
     @Override
-    protected AbstractResourceOperator<KubernetesClient, RoleBinding, RoleBindingList,
-            Resource<RoleBinding>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
+    protected AbstractNamespacedResourceOperator<KubernetesClient, RoleBinding, RoleBindingList,
+                Resource<RoleBinding>> createResourceOperations(Vertx vertx, KubernetesClient mockClient) {
         return new RoleBindingOperator(vertx, mockClient);
     }
 }

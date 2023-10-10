@@ -25,8 +25,8 @@ public class FeatureGatesTest {
             FeatureGates disabled;
 
             if ("UseKRaft".equals(gate.getName()))  {
-                enabled = new FeatureGates("+" + gate.getName() + ",+UseStrimziPodSets");
-                disabled = new FeatureGates("-" + gate.getName() + ",+UseStrimziPodSets");
+                enabled = new FeatureGates("+" + gate.getName() + ",+KafkaNodePools");
+                disabled = new FeatureGates("-" + gate.getName() + ",+KafkaNodePools");
             } else {
                 enabled = new FeatureGates("+" + gate.getName());
                 disabled = new FeatureGates("-" + gate.getName());
@@ -60,14 +60,16 @@ public class FeatureGatesTest {
 
     @ParallelTest
     public void testFeatureGatesParsing() {
-        assertThat(new FeatureGates("+UseKRaft").useKRaftEnabled(), is(true));
-        assertThat(new FeatureGates("+UseStrimziPodSets").useStrimziPodSetsEnabled(), is(true));
-        assertThat(new FeatureGates("-UseKRaft,-UseStrimziPodSets").useKRaftEnabled(), is(false));
-        assertThat(new FeatureGates("-UseKRaft,-UseStrimziPodSets").useStrimziPodSetsEnabled(), is(false));
-        assertThat(new FeatureGates("  +UseKRaft    ,    +UseStrimziPodSets").useKRaftEnabled(), is(true));
-        assertThat(new FeatureGates("  +UseKRaft    ,    +UseStrimziPodSets").useStrimziPodSetsEnabled(), is(true));
-        assertThat(new FeatureGates("+UseStrimziPodSets,-UseKRaft").useKRaftEnabled(), is(false));
-        assertThat(new FeatureGates("+UseStrimziPodSets,-UseKRaft").useStrimziPodSetsEnabled(), is(true));
+        assertThat(new FeatureGates("+UseKRaft,+KafkaNodePools").useKRaftEnabled(), is(true));
+        assertThat(new FeatureGates("-StableConnectIdentities").stableConnectIdentitiesEnabled(), is(false));
+        assertThat(new FeatureGates("+KafkaNodePools").kafkaNodePoolsEnabled(), is(true));
+        assertThat(new FeatureGates("-UseKRaft,-StableConnectIdentities").useKRaftEnabled(), is(false));
+        assertThat(new FeatureGates("-UseKRaft,-StableConnectIdentities").stableConnectIdentitiesEnabled(), is(false));
+        assertThat(new FeatureGates("-UseKRaft,-StableConnectIdentities,-KafkaNodePools").kafkaNodePoolsEnabled(), is(false));
+        assertThat(new FeatureGates("  +UseKRaft    ,    +KafkaNodePools").useKRaftEnabled(), is(true));
+        assertThat(new FeatureGates("  +UseKRaft    ,    +KafkaNodePools").kafkaNodePoolsEnabled(), is(true));
+        assertThat(new FeatureGates("+StableConnectIdentities,-UseKRaft").useKRaftEnabled(), is(false));
+        assertThat(new FeatureGates("+StableConnectIdentities,-UseKRaft").stableConnectIdentitiesEnabled(), is(true));
     }
 
     @ParallelTest
@@ -111,13 +113,16 @@ public class FeatureGatesTest {
     }
 
     @ParallelTest
-    public void testKraftAndPodSetsDependenciesNotFulfilled() {
-        InvalidConfigurationException e = assertThrows(InvalidConfigurationException.class, () -> new FeatureGates("+UseKRaft,-UseStrimziPodSets"));
-        assertThat(e.getMessage(), containsString("The UseKRaft feature gate can be enabled only when the UseStrimziPodSets feature gate is enabled as well."));
+    public void testKraftAndKafkaNOdePoolsNotFulfilled() {
+        InvalidConfigurationException e = assertThrows(InvalidConfigurationException.class, () -> new FeatureGates("+UseKRaft"));
+        assertThat(e.getMessage(), containsString("The UseKRaft feature gate can be enabled only together with the KafkaNodePools feature gate."));
+
+        e = assertThrows(InvalidConfigurationException.class, () -> new FeatureGates("+UseKRaft,-KafkaNodePools"));
+        assertThat(e.getMessage(), containsString("The UseKRaft feature gate can be enabled only together with the KafkaNodePools feature gate."));
     }
 
     @ParallelTest
-    public void testKraftAndPodSetsDependenciesFulfilled() {
-        assertThat(new FeatureGates("+UseKRaft,+UseStrimziPodSets").useKRaftEnabled(), is(true));
+    public void testKraftAndKafkaNodePoolsFulfilled() {
+        assertThat(new FeatureGates("+UseKRaft,+KafkaNodePools").useKRaftEnabled(), is(true));
     }
 }

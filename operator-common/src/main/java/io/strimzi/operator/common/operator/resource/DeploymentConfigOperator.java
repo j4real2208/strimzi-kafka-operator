@@ -17,7 +17,7 @@ import io.vertx.core.Vertx;
 /**
  * Operations for {@code DeploymentConfigs}s.
  */
-public class DeploymentConfigOperator extends AbstractScalableResourceOperator<OpenShiftClient, DeploymentConfig,
+public class DeploymentConfigOperator extends AbstractScalableNamespacedResourceOperator<OpenShiftClient, DeploymentConfig,
         DeploymentConfigList, DeployableScalableResource<DeploymentConfig>> {
     /**
      * Constructor
@@ -44,9 +44,9 @@ public class DeploymentConfigOperator extends AbstractScalableResourceOperator<O
     }
 
     @Override
-    protected Future<ReconcileResult<DeploymentConfig>> internalPatch(Reconciliation reconciliation, String namespace, String name, DeploymentConfig current, DeploymentConfig desired) {
+    protected Future<ReconcileResult<DeploymentConfig>> internalUpdate(Reconciliation reconciliation, String namespace, String name, DeploymentConfig current, DeploymentConfig desired) {
         desired.getSpec().getTemplate().getSpec().getContainers().get(0).setImage(current.getSpec().getTemplate().getSpec().getContainers().get(0).getImage());
-        return super.internalPatch(reconciliation, namespace, name, current, desired);
+        return super.internalUpdate(reconciliation, namespace, name, current, desired);
     }
 
     /**

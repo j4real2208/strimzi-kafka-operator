@@ -24,6 +24,7 @@ import io.fabric8.kubernetes.api.model.TolerationBuilder;
 import io.fabric8.kubernetes.api.model.TopologySpreadConstraint;
 import io.fabric8.kubernetes.api.model.TopologySpreadConstraintBuilder;
 import io.strimzi.api.kafka.model.ContainerEnvVar;
+import io.strimzi.api.kafka.model.JvmOptions;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaBuilder;
 import io.strimzi.api.kafka.model.KafkaResources;
@@ -33,10 +34,10 @@ import io.strimzi.api.kafka.model.listener.arraylistener.GenericKafkaListenerBui
 import io.strimzi.api.kafka.model.listener.arraylistener.KafkaListenerType;
 import io.strimzi.api.kafka.model.storage.JbodStorageBuilder;
 import io.strimzi.api.kafka.model.storage.PersistentClaimStorageBuilder;
-import io.strimzi.operator.PlatformFeaturesAvailability;
+import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.KafkaVersionTestUtils;
-import io.strimzi.operator.cluster.operator.resource.PodRevision;
-import io.strimzi.operator.common.MetricsAndLogging;
+import io.strimzi.operator.cluster.model.nodepools.NodePoolUtils;
+import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.platform.KubernetesVersion;
 import io.strimzi.plugin.security.profiles.impl.RestrictedPodSecurityProvider;
@@ -69,6 +70,7 @@ import static org.hamcrest.Matchers.hasProperty;
 @ParallelSuite
 public class KafkaClusterPodSetTest {
     private static final KafkaVersion.Lookup VERSIONS = KafkaVersionTestUtils.getKafkaVersionLookup();
+    private static final SharedEnvironmentProvider SHARED_ENV_PROVIDER = new MockSharedEnvironmentProvider();
     private static final String NAMESPACE = "my-namespace";
     private static final String CLUSTER = "my-cluster";
 
@@ -99,47 +101,47 @@ public class KafkaClusterPodSetTest {
                 .endKafka()
             .endSpec()
             .build();
-    private static final KafkaCluster KC = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+
+    private final static List<KafkaPool> POOLS = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, KAFKA, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+    private static final KafkaCluster KC = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, POOLS, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
     @ParallelTest
     public void testPodSet()   {
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        StrimziPodSet ps = kc.generatePodSet(3, true, null, null, brokerId -> Map.of("test-anno", kc.getPodName(brokerId)));
+        StrimziPodSet ps = KC.generatePodSets(true, null, null, brokerId -> Map.of("test-anno", KC.getPodName(brokerId))).get(0);
 
         assertThat(ps.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER)));
-        assertThat(ps.getMetadata().getLabels().entrySet().containsAll(kc.getLabelsWithStrimziName(kc.getName(), null).toMap().entrySet()), is(true));
-        assertThat(ps.getMetadata().getAnnotations().get(AbstractModel.ANNO_STRIMZI_IO_STORAGE), is(ModelUtils.encodeStorageToJson(new JbodStorageBuilder().withVolumes(new PersistentClaimStorageBuilder().withId(0).withSize("100Gi").withDeleteClaim(false).build()).build())));
-        assertThat(ps.getMetadata().getOwnerReferences().size(), is(1));
-        assertThat(ps.getMetadata().getOwnerReferences().get(0), is(kc.createOwnerReference()));
-        assertThat(ps.getSpec().getSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
+        assertThat(ps.getMetadata().getLabels().entrySet().containsAll(KC.labels.withAdditionalLabels(null).toMap().entrySet()), is(true));
+        assertThat(ps.getMetadata().getAnnotations().get(Annotations.ANNO_STRIMZI_IO_STORAGE), is(ModelUtils.encodeStorageToJson(new JbodStorageBuilder().withVolumes(new PersistentClaimStorageBuilder().withId(0).withSize("100Gi").withDeleteClaim(false).build()).build())));
+        TestUtils.checkOwnerReference(ps, KAFKA);
+        assertThat(ps.getSpec().getSelector().getMatchLabels(), is(KafkaClusterPodSetTest.KC.getSelectorLabels().withStrimziPoolName("kafka").toMap()));
         assertThat(ps.getSpec().getPods().size(), is(3));
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods)  {
-            assertThat(pod.getMetadata().getLabels().entrySet().containsAll(kc.getLabelsWithStrimziNameAndPodName(kc.getName(), pod.getMetadata().getName(), null).withStatefulSetPod(pod.getMetadata().getName()).withStrimziPodSetController(kc.getName()).toMap().entrySet()), is(true));
+            assertThat(pod.getMetadata().getLabels().entrySet().containsAll(KC.labels.withStrimziPodName(pod.getMetadata().getName()).withStatefulSetPod(pod.getMetadata().getName()).withStrimziPodSetController(KC.getComponentName()).toMap().entrySet()), is(true));
             assertThat(pod.getMetadata().getAnnotations().size(), is(2));
             assertThat(pod.getMetadata().getAnnotations().get(PodRevision.STRIMZI_REVISION_ANNOTATION), is(notNullValue()));
             assertThat(pod.getMetadata().getAnnotations().get("test-anno"), is(pod.getMetadata().getName()));
 
             assertThat(pod.getSpec().getHostname(), is(pod.getMetadata().getName()));
-            assertThat(pod.getSpec().getSubdomain(), is(kc.getHeadlessServiceName()));
+            assertThat(pod.getSpec().getSubdomain(), is(KafkaResources.brokersServiceName(CLUSTER)));
             assertThat(pod.getSpec().getRestartPolicy(), is("Always"));
             assertThat(pod.getSpec().getTerminationGracePeriodSeconds(), is(30L));
             assertThat(pod.getSpec().getVolumes().stream()
                     .filter(volume -> volume.getName().equalsIgnoreCase("strimzi-tmp"))
-                    .findFirst().orElseThrow().getEmptyDir().getSizeLimit(), is(new Quantity(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
+                    .findFirst().orElseThrow().getEmptyDir().getSizeLimit(), is(new Quantity(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_SIZE)));
 
             assertThat(pod.getSpec().getContainers().size(), is(1));
             assertThat(pod.getSpec().getContainers().get(0).getLivenessProbe().getTimeoutSeconds(), is(5));
             assertThat(pod.getSpec().getContainers().get(0).getLivenessProbe().getInitialDelaySeconds(), is(15));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getTimeoutSeconds(), is(5));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getInitialDelaySeconds(), is(15));
-            assertThat(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(AbstractModel.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is(Boolean.toString(AbstractModel.DEFAULT_JVM_GC_LOGGING_ENABLED)));
+            assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(AbstractModel.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is(Boolean.toString(JvmOptions.DEFAULT_GC_LOGGING_ENABLED)));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is("data-0"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is("/var/lib/kafka/data-0"));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getName(), is(KafkaCluster.CLUSTER_CA_CERTS_VOLUME));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getMountPath(), is(KafkaCluster.CLUSTER_CA_CERTS_VOLUME_MOUNT));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(3).getName(), is(KafkaCluster.BROKER_CERTS_VOLUME));
@@ -154,7 +156,7 @@ public class KafkaClusterPodSetTest {
             assertThat(pod.getSpec().getVolumes().size(), is(7));
             assertThat(pod.getSpec().getVolumes().get(0).getName(), is("data-0"));
             assertThat(pod.getSpec().getVolumes().get(0).getPersistentVolumeClaim(), is(notNullValue()));
-            assertThat(pod.getSpec().getVolumes().get(1).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+            assertThat(pod.getSpec().getVolumes().get(1).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
             assertThat(pod.getSpec().getVolumes().get(1).getEmptyDir(), is(notNullValue()));
             assertThat(pod.getSpec().getVolumes().get(2).getName(), is(KafkaCluster.CLUSTER_CA_CERTS_VOLUME));
             assertThat(pod.getSpec().getVolumes().get(2).getSecret().getSecretName(), is("my-cluster-cluster-ca-cert"));
@@ -182,8 +184,7 @@ public class KafkaClusterPodSetTest {
                 2, Map.of("PLAIN_9092", "10002")
         );
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        String config = kc.generatePerBrokerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
+        String config = KC.generatePerBrokerConfiguration(2, advertisedHostnames, advertisedPorts);
 
         assertThat(config, containsString("broker.id=2"));
         assertThat(config, containsString("node.id=2"));
@@ -205,15 +206,14 @@ public class KafkaClusterPodSetTest {
                 2, Map.of("PLAIN_9092", "9092")
         );
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        List<ConfigMap> cms = kc.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts);
+        List<ConfigMap> cms = KC.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts);
 
         assertThat(cms.size(), is(3));
 
         for (ConfigMap cm : cms)    {
             assertThat(cm.getData().size(), is(3));
             assertThat(cm.getMetadata().getName(), startsWith("my-cluster-kafka-"));
-            kc.getSelectorLabels().toMap().forEach((key, value) -> assertThat(cm.getMetadata().getLabels(), hasEntry(key, value)));
+            KC.getSelectorLabels().toMap().forEach((key, value) -> assertThat(cm.getMetadata().getLabels(), hasEntry(key, value)));
             assertThat(cm.getData().get("log4j.properties"), is(notNullValue()));
             assertThat(cm.getData().get("server.config"), is(notNullValue()));
             assertThat(cm.getData().get("listeners.config"), is("PLAIN_9092"));
@@ -360,17 +360,18 @@ public class KafkaClusterPodSetTest {
                 .build();
 
         // Test the resources
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet ps = kc.generatePodSet(3, true, null, null, brokerId -> Map.of("special", "annotation"));
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = kc.generatePodSets(true, null, null, brokerId -> Map.of("special", "annotation")).get(0);
 
         assertThat(ps.getMetadata().getName(), is(KafkaResources.kafkaStatefulSetName(CLUSTER)));
         assertThat(ps.getMetadata().getLabels().entrySet().containsAll(spsLabels.entrySet()), is(true));
         assertThat(ps.getMetadata().getAnnotations().entrySet().containsAll(spsAnnos.entrySet()), is(true));
-        assertThat(ps.getSpec().getSelector().getMatchLabels(), is(kc.getSelectorLabels().toMap()));
+        assertThat(ps.getSpec().getSelector().getMatchLabels(), is(kc.getSelectorLabels().withStrimziPoolName("kafka").toMap()));
         assertThat(ps.getSpec().getPods().size(), is(3));
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods)  {
             assertThat(pod.getMetadata().getLabels().entrySet().containsAll(podLabels.entrySet()), is(true));
             assertThat(pod.getMetadata().getAnnotations().entrySet().containsAll(podAnnos.entrySet()), is(true));
@@ -417,11 +418,11 @@ public class KafkaClusterPodSetTest {
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getFailureThreshold(), is(readinessProbe.getFailureThreshold()));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getSuccessThreshold(), is(readinessProbe.getSuccessThreshold()));
             assertThat(pod.getSpec().getContainers().get(0).getReadinessProbe().getPeriodSeconds(), is(readinessProbe.getPeriodSeconds()));
-            assertThat(AbstractModel.containerEnvVars(pod.getSpec().getContainers().get(0)).get(AbstractModel.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is("true"));
+            assertThat(io.strimzi.operator.cluster.TestUtils.containerEnvVars(pod.getSpec().getContainers().get(0)).get(AbstractModel.ENV_VAR_STRIMZI_KAFKA_GC_LOG_ENABLED), is("true"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getName(), is("data-0"));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(0).getMountPath(), is("/var/lib/kafka/data-0"));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
-            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is(AbstractModel.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getName(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_VOLUME_NAME));
+            assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(1).getMountPath(), is(VolumeUtils.STRIMZI_TMP_DIRECTORY_DEFAULT_MOUNT_PATH));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getName(), is(KafkaCluster.CLUSTER_CA_CERTS_VOLUME));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(2).getMountPath(), is(KafkaCluster.CLUSTER_CA_CERTS_VOLUME_MOUNT));
             assertThat(pod.getSpec().getContainers().get(0).getVolumeMounts().get(3).getName(), is(KafkaCluster.BROKER_CERTS_VOLUME));
@@ -453,11 +454,12 @@ public class KafkaClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet ps = kc.generatePodSet(3, true, null, null, brokerId -> new HashMap<>());
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = kc.generatePodSets(true, null, null, brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(2));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(true));
@@ -474,11 +476,10 @@ public class KafkaClusterPodSetTest {
         secrets.add(secret1);
         secrets.add(secret2);
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
-        StrimziPodSet ps = kc.generatePodSet(3, true, null, secrets, brokerId -> new HashMap<>());
+        StrimziPodSet ps = KC.generatePodSets(true, null, secrets, brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(2));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(true));
@@ -504,11 +505,12 @@ public class KafkaClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, VERSIONS);
-        StrimziPodSet ps = kc.generatePodSet(3, true, null, List.of(secret1), brokerId -> new HashMap<>());
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
+        StrimziPodSet ps = kc.generatePodSets(true, null, List.of(secret1), brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(1));
             assertThat(pod.getSpec().getImagePullSecrets().contains(secret1), is(false));
@@ -518,10 +520,10 @@ public class KafkaClusterPodSetTest {
 
     @ParallelTest
     public void testDefaultImagePullSecrets() {
-        StrimziPodSet ps = KC.generatePodSet(3, true, null, null, brokerId -> new HashMap<>());
+        StrimziPodSet ps = KC.generatePodSets(true, null, null, brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getImagePullSecrets().size(), is(0));
         }
@@ -530,47 +532,50 @@ public class KafkaClusterPodSetTest {
     @ParallelTest
     public void testImagePullPolicy() {
         // Test ALWAYS policy
-        StrimziPodSet ps = KC.generatePodSet(3, true, ImagePullPolicy.ALWAYS, null, brokerId -> new HashMap<>());
+        StrimziPodSet ps = KC.generatePodSets(true, ImagePullPolicy.ALWAYS, null, brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getContainers().get(0).getImagePullPolicy(), is(ImagePullPolicy.ALWAYS.toString()));
         }
 
         // Test IFNOTPRESENT policy
-        ps = KC.generatePodSet(3, true, ImagePullPolicy.IFNOTPRESENT, null, brokerId -> new HashMap<>());
+        ps = KC.generatePodSets(true, ImagePullPolicy.IFNOTPRESENT, null, brokerId -> new HashMap<>()).get(0);
 
         // We need to loop through the pods to make sure they have the right values
-        pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        pods = PodSetUtils.podSetToPods(ps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getContainers().get(0).getImagePullPolicy(), is(ImagePullPolicy.IFNOTPRESENT.toString()));
         }
     }
 
     @ParallelTest
-    public void testGenerateStatefulSetWithSetSizeLimit() {
+    public void testGeneratePodSetWithSetSizeLimit() {
         String sizeLimit = "1Gi";
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+        Kafka kafka = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withNewEphemeralStorage().withSizeLimit(sizeLimit).endEphemeralStorage()
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = kc.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = kc.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
+
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getVolumes().get(0).getEmptyDir().getSizeLimit(), is(new Quantity("1", "Gi")));
         }
     }
 
     @ParallelTest
-    public void testGenerateStatefulSetWithEmptySizeLimit() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+    public void testGeneratePodSetWithEmptySizeLimit() {
+        Kafka kafka = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withNewEphemeralStorage().endEphemeralStorage()
@@ -578,11 +583,13 @@ public class KafkaClusterPodSetTest {
                 .endSpec()
                 .build();
 
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = kc.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = kc.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
+
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getVolumes().get(0).getEmptyDir().getSizeLimit(), is(Matchers.nullValue()));
         }
@@ -590,36 +597,41 @@ public class KafkaClusterPodSetTest {
 
     @ParallelTest
     public void testEphemeralStorage()    {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+        Kafka kafka = new KafkaBuilder(KAFKA)
                 .editSpec()
                     .editKafka()
                         .withNewEphemeralStorage().endEphemeralStorage()
                     .endKafka()
                 .endSpec()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet ps = kc.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = kc.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
+
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getVolumes().stream().filter(v -> "data".equals(v.getName())).findFirst().orElseThrow().getEmptyDir(), is(notNullValue()));
         }
 
         // Check PVCs
-        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims(kc.getStorage());
+        List<PersistentVolumeClaim> pvcs = kc.generatePersistentVolumeClaims();
         assertThat(pvcs.size(), is(0));
     }
 
     @ParallelTest
     public void testRestrictedSecurityContext() {
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, VERSIONS);
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, KAFKA, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, KAFKA, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
         kc.securityProvider = new RestrictedPodSecurityProvider();
         kc.securityProvider.configure(new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION));
 
         // Test generated SPS
-        StrimziPodSet ps = kc.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
-        List<Pod> pods = PodSetUtils.mapsToPods(ps.getSpec().getPods());
+        StrimziPodSet ps = kc.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
+        List<Pod> pods = PodSetUtils.podSetToPods(ps);
+
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getSecurityContext().getFsGroup(), is(0L));
 
@@ -632,18 +644,20 @@ public class KafkaClusterPodSetTest {
 
     @ParallelTest
     public void testCustomLabelsFromCR() {
-        Kafka kafkaAssembly = new KafkaBuilder(KAFKA)
+        Kafka kafka = new KafkaBuilder(KAFKA)
                 .editMetadata()
                     .addToLabels("foo", "bar")
                 .endMetadata()
                 .build();
-        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafkaAssembly, VERSIONS);
+
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, null, Map.of(), Map.of(), false, SHARED_ENV_PROVIDER);
+        KafkaCluster kc = KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, false, null, SHARED_ENV_PROVIDER);
 
         // Test generated SPS
-        StrimziPodSet sps = kc.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
+        StrimziPodSet sps = kc.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
         assertThat(sps.getMetadata().getLabels().get("foo"), is("bar"));
 
-        List<Pod> pods = PodSetUtils.mapsToPods(sps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(sps);
         for (Pod pod : pods) {
             assertThat(pod.getMetadata().getLabels().get("foo"), is("bar"));
         }
@@ -651,9 +665,9 @@ public class KafkaClusterPodSetTest {
 
     @ParallelTest
     public void testDefaultSecurityContext() {
-        StrimziPodSet sps = KC.generatePodSet(3, false, null, null, brokerId -> new HashMap<>());
+        StrimziPodSet sps = KC.generatePodSets(false, null, null, brokerId -> new HashMap<>()).get(0);
 
-        List<Pod> pods = PodSetUtils.mapsToPods(sps.getSpec().getPods());
+        List<Pod> pods = PodSetUtils.podSetToPods(sps);
         for (Pod pod : pods) {
             assertThat(pod.getSpec().getSecurityContext().getFsGroup(), is(0L));
             assertThat(pod.getSpec().getContainers().get(0).getSecurityContext(), is(nullValue()));

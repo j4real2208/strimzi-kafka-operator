@@ -6,6 +6,7 @@ package io.strimzi.operator.common.operator.resource;
 
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
+import io.fabric8.kubernetes.api.model.ListOptionsBuilder;
 import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.WatcherException;
@@ -16,7 +17,6 @@ import io.fabric8.kubernetes.client.dsl.Watchable;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.vertx.core.AsyncResult;
-import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Handler;
@@ -27,12 +27,19 @@ import java.util.List;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
+/**
+ * Utility method for working with Kubernetes resources
+ */
 public class ResourceSupport {
-    public static final long DEFAULT_TIMEOUT_MS = 300_000;
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(ResourceSupport.class);
 
     private final Vertx vertx;
 
+    /**
+     * Constructor
+     *
+     * @param vertx     Vertx instance
+     */
     ResourceSupport(Vertx vertx) {
         this.vertx = vertx;
     }
@@ -118,7 +125,7 @@ public class ResourceSupport {
      * @param <U> The result type of the {@code watchFn}.
      *
      * @return A Futures which completes when the {@code watchFn} returns non-null
-     * in response to some Kubenetes even on the watched resource(s).
+     * in response to some Kubernetes even on the watched resource(s).
      */
     <T, U> Future<U> selfClosingWatch(Reconciliation reconciliation,
                                       Watchable<T> watchable,
@@ -141,7 +148,7 @@ public class ResourceSupport {
                 this.resultPromise = Promise.promise();
                 this.timerId = vertx.setTimer(operationTimeoutMs,
                     ignored -> donePromise.tryFail(new TimeoutException("\"" + watchFnDescription + "\" timed out after " + operationTimeoutMs + "ms")));
-                CompositeFuture.join(watchPromise.future(), donePromise.future()).onComplete(joinResult -> {
+                Future.join(watchPromise.future(), donePromise.future()).onComplete(joinResult -> {
                     Future<Void> closeFuture;
                     if (watchPromise.future().succeeded()) {
                         closeFuture = closeOnWorkerThread(watchPromise.future().result());
@@ -265,7 +272,7 @@ public class ResourceSupport {
         return executeBlocking(
             blockingFuture -> {
                 try {
-                    blockingFuture.complete(resource.list().getItems());
+                    blockingFuture.complete(resource.list(new ListOptionsBuilder().withResourceVersion("0").build()).getItems());
                 } catch (Throwable t) {
                     blockingFuture.fail(t);
                 }

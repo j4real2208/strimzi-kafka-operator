@@ -26,10 +26,10 @@ import lombok.EqualsAndHashCode;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({
     "replicas", "image", "bootstrapServers", "tls", "authentication", "http", "adminClient", "consumer",
-    "producer", "resources", "jvmOptions", "logging",
+    "producer", "resources", "jvmOptions", "logging", "clientRackInitImage", "rack",
     "enableMetrics", "livenessProbe", "readinessProbe", "template", "tracing"})
 @EqualsAndHashCode
-public class KafkaBridgeSpec extends Spec {
+public class KafkaBridgeSpec extends Spec implements HasConfigurableLogging, HasLivenessProbe, HasReadinessProbe {
     private static final long serialVersionUID = 1L;
     private static final int DEFAULT_REPLICAS = 1;
 
@@ -51,8 +51,11 @@ public class KafkaBridgeSpec extends Spec {
     private Probe readinessProbe;
     private KafkaBridgeTemplate template;
     private Tracing tracing;
+    private String clientRackInitImage;
+    private Rack rack;
 
-    @Description("The number of pods in the `Deployment`.")
+    @Description("The number of pods in the `Deployment`.  " +
+            "Defaults to `1`.")
     @Minimum(0)
     @JsonProperty(defaultValue = "1")
     public int getReplicas() {
@@ -75,10 +78,12 @@ public class KafkaBridgeSpec extends Spec {
 
     @Description("Logging configuration for Kafka Bridge.")
     @JsonInclude(value = JsonInclude.Include.NON_NULL)
+    @Override
     public Logging getLogging() {
         return logging;
     }
 
+    @Override
     public void setLogging(Logging logging) {
         this.logging = logging;
     }
@@ -224,5 +229,26 @@ public class KafkaBridgeSpec extends Spec {
 
     public void setTracing(Tracing tracing) {
         this.tracing = tracing;
+    }
+
+
+    @Description("The image of the init container used for initializing the `client.rack`.")
+    @JsonInclude(value = JsonInclude.Include.NON_NULL)
+    public String getClientRackInitImage() {
+        return clientRackInitImage;
+    }
+
+    public void setClientRackInitImage(String brokerRackInitImage) {
+        this.clientRackInitImage = brokerRackInitImage;
+    }
+
+    @Description("Configuration of the node label which will be used as the client.rack consumer configuration.")
+    @JsonInclude(value = JsonInclude.Include.NON_NULL)
+    public Rack getRack() {
+        return rack;
+    }
+
+    public void setRack(Rack rack) {
+        this.rack = rack;
     }
 }

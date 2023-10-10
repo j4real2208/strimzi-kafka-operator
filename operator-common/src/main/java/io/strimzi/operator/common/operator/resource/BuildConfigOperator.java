@@ -19,7 +19,7 @@ import io.vertx.core.Vertx;
 /**
  * Operations for {@code BuildConfig}s.
  */
-public class BuildConfigOperator extends AbstractResourceOperator<OpenShiftClient, BuildConfig, BuildConfigList, BuildConfigResource<BuildConfig, Void, Build>> {
+public class BuildConfigOperator extends AbstractNamespacedResourceOperator<OpenShiftClient, BuildConfig, BuildConfigList, BuildConfigResource<BuildConfig, Void, Build>> {
     /**
      * Constructor
      * @param vertx The Vertx instance
@@ -35,17 +35,17 @@ public class BuildConfigOperator extends AbstractResourceOperator<OpenShiftClien
     }
 
     @Override
-    protected Future<ReconcileResult<BuildConfig>> internalPatch(Reconciliation reconciliation, String namespace, String name, BuildConfig current, BuildConfig desired) {
+    protected Future<ReconcileResult<BuildConfig>> internalUpdate(Reconciliation reconciliation, String namespace, String name, BuildConfig current, BuildConfig desired) {
         desired.getSpec().setTriggers(current.getSpec().getTriggers());
         // Cascading needs to be set to false to make sure the Builds are not deleted during reconciliation
-        return super.internalPatch(reconciliation, namespace, name, current, desired);
+        return super.internalUpdate(reconciliation, namespace, name, current, desired);
     }
 
     /**
      * Asynchronously deletes the resource in the given {@code namespace} with the given {@code name},
      * returning a Future which completes once the {@code delete} returns.
      *
-     * This is n override for BuildConfigs because the {@code selfClosingWatch} used by {@code AbstractResourceoperator} does not work for them.
+     * This is n override for BuildConfigs because the {@code selfClosingWatch} used by {@code AbstractResourceOperator} does not work for them.
      *
      * @param reconciliation The reconciliation
      * @param namespace Namespace of the resource which should be deleted

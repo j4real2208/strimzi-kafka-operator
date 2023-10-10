@@ -7,6 +7,9 @@ package io.strimzi.systemtest.resources.operator;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
+import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
+import io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.strimzi.systemtest.Constants;
@@ -18,6 +21,7 @@ import io.strimzi.systemtest.resources.kubernetes.DeploymentResource;
 import io.strimzi.systemtest.utils.StUtils;
 import io.strimzi.systemtest.utils.kubeUtils.controllers.DeploymentUtils;
 import io.strimzi.test.TestUtils;
+import io.strimzi.test.k8s.KubeClusterResource;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,6 +40,7 @@ public class BundleResource implements ResourceType<Deployment> {
     private long reconciliationInterval;
     private List<EnvVar> extraEnvVars;
     private Map<String, String> extraLabels;
+    private int replicas = 1;
 
     @Override
     public String getKind() {
@@ -44,15 +49,20 @@ public class BundleResource implements ResourceType<Deployment> {
     @Override
     public Deployment get(String namespace, String name) {
         String deploymentName = ResourceManager.kubeClient().namespace(namespace).getDeploymentNameByPrefix(name);
-        return deploymentName != null ? ResourceManager.kubeClient().getDeployment(deploymentName) : null;
+        return deploymentName != null ? ResourceManager.kubeClient().getDeployment(namespace, deploymentName) : null;
     }
     @Override
     public void create(Deployment resource) {
-        ResourceManager.kubeClient().createOrReplaceDeployment(resource);
+        ResourceManager.kubeClient().createDeployment(resource);
     }
     @Override
     public void delete(Deployment resource) {
-        ResourceManager.kubeClient().namespace(resource.getMetadata().getNamespace()).deleteDeployment(resource.getMetadata().getName());
+        ResourceManager.kubeClient().deleteDeployment(resource.getMetadata().getNamespace(), resource.getMetadata().getName());
+    }
+
+    @Override
+    public void update(Deployment resource) {
+        ResourceManager.kubeClient().updateDeployment(resource);
     }
 
     @Override
@@ -76,6 +86,7 @@ public class BundleResource implements ResourceType<Deployment> {
         this.reconciliationInterval = builder.reconciliationInterval;
         this.extraEnvVars = builder.extraEnvVars;
         this.extraLabels = builder.extraLabels;
+        this.replicas = builder.replicas;
 
         // assign defaults is something is not specified
         if (this.name == null || this.name.isEmpty()) this.name = Constants.STRIMZI_DEPLOYMENT_NAME;
@@ -95,6 +106,7 @@ public class BundleResource implements ResourceType<Deployment> {
         private long reconciliationInterval;
         private List<EnvVar> extraEnvVars;
         private Map<String, String> extraLabels;
+        private int replicas;
 
         public BundleResourceBuilder withName(String name) {
             this.name = name;
@@ -128,6 +140,11 @@ public class BundleResource implements ResourceType<Deployment> {
             return self();
         }
 
+        public BundleResourceBuilder withReplicas(int replicas) {
+            this.replicas = replicas;
+            return self();
+        }
+
         protected BundleResourceBuilder self() {
             return this;
         }
@@ -157,7 +174,8 @@ public class BundleResource implements ResourceType<Deployment> {
             .withWatchingNamespaces(namespaceToWatch)
             .withOperationTimeout(operationTimeout)
             .withReconciliationInterval(reconciliationInterval)
-            .withExtraEnvVars(extraEnvVars);
+            .withExtraEnvVars(extraEnvVars)
+            .withReplicas(replicas);
     }
 
     public DeploymentBuilder buildBundleDeployment() {
@@ -224,6 +242,17 @@ public class BundleResource implements ResourceType<Deployment> {
 
         // Apply updated env variables
         clusterOperator.getSpec().getTemplate().getSpec().getContainers().get(0).setEnv(envVarsWithoutDuplicates);
+
+        // Change default values for Cluster Operator memory when RESOURCE_ALLOCATION_STRATEGY is not set to NOT_SHARED
+        if (KubeClusterResource.getInstance().fipsEnabled()) {
+            ResourceRequirements resourceRequirements = new ResourceRequirementsBuilder()
+                .withRequests(Map.of("memory", new Quantity(Constants.CO_REQUESTS_MEMORY), "cpu", new Quantity(Constants.CO_REQUESTS_CPU)))
+                .withLimits(Map.of("memory", new Quantity(Constants.CO_LIMITS_MEMORY), "cpu", new Quantity(Constants.CO_LIMITS_CPU)))
+                .build();
+
+            clusterOperator.getSpec().getTemplate().getSpec().getContainers().get(0).setResources(resourceRequirements);
+        }
+
         return new DeploymentBuilder(clusterOperator)
             .editMetadata()
                 .withName(name)
@@ -231,6 +260,7 @@ public class BundleResource implements ResourceType<Deployment> {
                 .addToLabels(Constants.DEPLOYMENT_TYPE, DeploymentTypes.BundleClusterOperator.name())
             .endMetadata()
             .editSpec()
+                .withReplicas(this.replicas)
                 .withNewSelector()
                     .addToMatchLabels("name", Constants.STRIMZI_DEPLOYMENT_NAME)
                     .addToMatchLabels(this.extraLabels)
@@ -249,6 +279,11 @@ public class BundleResource implements ResourceType<Deployment> {
                                 // in case we execute more than 10 test cases in parallel we at least 2Mi storage
                                 .withNewSizeLimit("2Mi")
                             .endEmptyDir()
+                        .endVolume()
+                        .editLastVolume()
+                            .editConfigMap()
+                                .withName(name)
+                            .endConfigMap()
                         .endVolume()
                     .endSpec()
                 .endTemplate()

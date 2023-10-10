@@ -30,13 +30,19 @@ public class KafkaMirrorMakerResource implements ResourceType<KafkaMirrorMaker> 
     }
     @Override
     public void create(KafkaMirrorMaker resource) {
-        kafkaMirrorMakerClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).createOrReplace();
+        kafkaMirrorMakerClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).create();
     }
     @Override
     public void delete(KafkaMirrorMaker resource) {
         kafkaMirrorMakerClient().inNamespace(resource.getMetadata().getNamespace()).withName(
             resource.getMetadata().getName()).withPropagationPolicy(DeletionPropagation.FOREGROUND).delete();
     }
+
+    @Override
+    public void update(KafkaMirrorMaker resource) {
+        kafkaMirrorMakerClient().inNamespace(resource.getMetadata().getNamespace()).resource(resource).update();
+    }
+
     @Override
     public boolean waitForReadiness(KafkaMirrorMaker resource) {
         return ResourceManager.waitForResourceStatus(kafkaMirrorMakerClient(), resource, CustomResourceStatus.Ready);
@@ -44,10 +50,6 @@ public class KafkaMirrorMakerResource implements ResourceType<KafkaMirrorMaker> 
 
     public static MixedOperation<KafkaMirrorMaker, KafkaMirrorMakerList, Resource<KafkaMirrorMaker>> kafkaMirrorMakerClient() {
         return Crds.mirrorMakerOperation(ResourceManager.kubeClient().getClient());
-    }
-
-    public static void replaceMirrorMakerResource(String resourceName, Consumer<KafkaMirrorMaker> editor) {
-        ResourceManager.replaceCrdResource(KafkaMirrorMaker.class, KafkaMirrorMakerList.class, resourceName, editor);
     }
 
     public static void replaceMirrorMakerResourceInSpecificNamespace(String resourceName, Consumer<KafkaMirrorMaker> editor, String namespaceName) {
